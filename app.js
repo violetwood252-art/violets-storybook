@@ -8,17 +8,23 @@ let state;try{state=JSON.parse(localStorage.getItem(KEY))||structuredClone(seed)
 let currentPage='home',readerId=null,editingId=null,selectedFileText='',selectedAudioUrl='',audioObjectUrl='',audio=new Audio(),dragTrackId=null,toastTimer,readerProgressTimer=null;
 const MEDIA_DB_NAME='violets-storybook-media-v1';
 const MEDIA_STORE_NAME='audio-files';
-const COVER_STORE_NAME='cover-files';
 let mediaDbPromise=null;
 const localTrackUrls=new Map();
-const localCoverUrls=new Map();
-let pendingCoverStoryId=null;
+const coverObjectUrls=new Map();
+const coverPreviewUrls=new Map();
 const titles={home:'给故事一个温柔的家',stories:'每一篇故事，都值得被珍藏',characters:'那些住进故事里的人',series:'为不同的故事宇宙建立秩序',music:'让每个故事拥有自己的旋律',themes:'设计属于你的阅读世界',settings:'让收藏安心留在身边'};
 function stateForStorage(source=state){
   // Keep media bytes in IndexedDB, never in localStorage. Also strip stale
   // File references and blob: URLs left by older versions of this app.
   return {
     ...source,
+    stories:(source.stories||[]).map(story=>{
+      const {coverFile,...metadata}=story;
+      // Blob URLs are valid only for the current document. Keep the durable
+      // IndexedDB record ID and rebuild its URL whenever the app is reopened.
+      if(typeof metadata.cover==='string'&&metadata.cover.startsWith('blob:'))metadata.cover='';
+      return metadata;
+    }),
     tracks:(source.tracks||[]).map(track=>{
       const {file,blobUrl,...metadata}=track;
       return metadata;
@@ -37,26 +43,26 @@ function persist(msg='已自动保存'){
   }
 }
 
-// Local audio bytes and cover images live in IndexedDB. localStorage keeps metadata.
+// Local audio bytes are stored in IndexedDB so they survive page reloads and
+// app restarts. localStorage is reserved for lightweight library metadata.
 function openMediaDB(){
   if(mediaDbPromise)return mediaDbPromise;
-  if(!window.indexedDB)return Promise.reject(new Error('当前运行环境不支持 IndexedDB，无法持久保存本地媒体。'));
+  if(!window.indexedDB)return Promise.reject(new Error('当前运行环境不支持 IndexedDB，无法持久保存本地音频。'));
   let request;
-  try{request=window.indexedDB.open(MEDIA_DB_NAME,2)}
+  try{request=window.indexedDB.open(MEDIA_DB_NAME,1)}
   catch(error){return Promise.reject(error)}
   mediaDbPromise=new Promise((resolve,reject)=>{
     request.onupgradeneeded=()=>{
       const db=request.result;
       if(!db.objectStoreNames.contains(MEDIA_STORE_NAME))db.createObjectStore(MEDIA_STORE_NAME,{keyPath:'id'});
-      if(!db.objectStoreNames.contains(COVER_STORE_NAME))db.createObjectStore(COVER_STORE_NAME,{keyPath:'id'});
     };
     request.onsuccess=()=>{
       const db=request.result;
       db.onversionchange=()=>{db.close();mediaDbPromise=null};
       resolve(db);
     };
-    request.onerror=()=>{const error=request.error||new Error('无法打开本地媒体数据库。');mediaDbPromise=null;reject(error)};
-    request.onblocked=()=>console.warn('本地媒体数据库升级被其他页面阻塞，请关闭其他收藏馆页面后重试。');
+    request.onerror=()=>{const error=request.error||new Error('无法打开本地音频数据库。');mediaDbPromise=null;reject(error)};
+    request.onblocked=()=>console.warn('本地音频数据库升级被其他页面阻塞，请关闭其他收藏馆页面后重试。');
   });
   return mediaDbPromise;
 }
@@ -136,169 +142,36 @@ async function pruneAudioRecords(keepIds=[]){
     tx.onabort=()=>reject(tx.error||new Error('清理旧音频被中止。'));
   });
 }
-function saveCoverRecord(id,file){
-  return openMediaDB().then(db=>new Promise((resolve,reject)=>{
-    let tx;
-    try{
-      tx=db.transaction(COVER_STORE_NAME,'readwrite');
-      tx.objectStore(COVER_STORE_NAME).put({
-        id,
-        blob:file.slice(0,file.size,file.type||'image/jpeg'),
-        name:file.name||'cover',
-        type:file.type||'image/jpeg',
-        size:file.size||0,
-        savedAt:Date.now()
-      });
-    }catch(error){reject(error);return}
-    tx.oncomplete=()=>resolve(true);
-    tx.onerror=()=>reject(tx.error||new Error('封面图片保存失败。'));
-    tx.onabort=()=>reject(tx.error||new Error('封面图片保存被中止。'));
-  }));
-}
-function getCoverRecord(id){
-  return openMediaDB().then(db=>new Promise((resolve,reject)=>{
-    let request;
-    try{request=db.transaction(COVER_STORE_NAME,'readonly').objectStore(COVER_STORE_NAME).get(id)}
-    catch(error){reject(error);return}
-    request.onsuccess=()=>resolve(request.result||null);
-    request.onerror=()=>reject(request.error||new Error('读取封面图片失败。'));
-  }));
-}
-function getCoverRecordKeys(){
-  return openMediaDB().then(db=>new Promise((resolve,reject)=>{
-    let request;
-    try{request=db.transaction(COVER_STORE_NAME,'readonly').objectStore(COVER_STORE_NAME).getAllKeys()}
-    catch(error){reject(error);return}
-    request.onsuccess=()=>resolve(request.result||[]);
-    request.onerror=()=>reject(request.error||new Error('读取封面列表失败。'));
-  }));
-}
-function deleteCoverRecord(id){
-  return openMediaDB().then(db=>new Promise((resolve,reject)=>{
-    let tx;
-    try{tx=db.transaction(COVER_STORE_NAME,'readwrite');tx.objectStore(COVER_STORE_NAME).delete(id)}
-    catch(error){reject(error);return}
-    tx.oncomplete=()=>resolve(true);
-    tx.onerror=()=>reject(tx.error||new Error('删除封面图片失败。'));
-    tx.onabort=()=>reject(tx.error||new Error('删除封面图片被中止。'));
-  }));
-}
-async function pruneCoverRecords(keepIds=[]){
-  const keep=new Set(keepIds);
-  const keys=await getCoverRecordKeys();
-  const obsolete=keys.filter(id=>!keep.has(id));
-  if(!obsolete.length)return;
-  const db=await openMediaDB();
-  await new Promise((resolve,reject)=>{
-    let tx;
-    try{
-      tx=db.transaction(COVER_STORE_NAME,'readwrite');
-      const store=tx.objectStore(COVER_STORE_NAME);
-      obsolete.forEach(id=>store.delete(id));
-    }catch(error){reject(error);return}
-    tx.oncomplete=resolve;
-    tx.onerror=()=>reject(tx.error||new Error('清理旧封面失败。'));
-    tx.onabort=()=>reject(tx.error||new Error('清理旧封面被中止。'));
-  });
-}
-function revokeCoverUrl(id){
-  const url=localCoverUrls.get(id);
-  if(url){URL.revokeObjectURL(url);localCoverUrls.delete(id)}
-}
-async function initializePersistentCovers(shouldRender=true){
-  let changed=false;
-  const keepIds=new Set((state.stories||[]).map(story=>story.coverMediaId).filter(Boolean));
-  for(const [id,url] of [...localCoverUrls.entries()]){
-    if(!keepIds.has(id)){URL.revokeObjectURL(url);localCoverUrls.delete(id)}
-  }
-  for(const id of keepIds){
-    if(localCoverUrls.has(id))continue;
-    try{
-      const record=await getCoverRecord(id);
-      if(record?.blob)localCoverUrls.set(id,URL.createObjectURL(record.blob));
-      else console.warn('找不到已保存的封面媒体：',id);
-    }catch(error){console.warn('读取封面媒体失败：',error)}
-  }
-  // Migrate legacy cover values that were short-lived blob URLs; don't show a broken image.
-  for(const story of state.stories||[]){
-    if(typeof story.cover==='string'&&story.cover.startsWith('blob:')&&!story.coverMediaId){
-      story.cover='';changed=true;
-    }
-    if(story.summary==null||String(story.summary).trim()===''){
-      const fallback=story.description??story.synopsis??story.intro??story.blurb??'';
-      if(String(fallback).trim()){story.summary=String(fallback);changed=true}
-    }
-  }
-  if(changed)persist(null);
-  if(shouldRender&&['home','stories'].includes(currentPage))render();
-}
-async function setStoryCover(story,file){
-  if(!story||!file)return;
-  if(!/^image\/(?:png|jpeg|jpg|gif|webp|avif)$/.test(file.type||'')){
-    toast('请选取 PNG、JPEG、GIF、WebP 或 AVIF 图片。');
-    return;
-  }
-  if(file.size>15*1024*1024){
-    toast('封面图片不能超过 15 MiB，请先压缩后再上传。');
-    return;
-  }
-  const newId=uid('cover');
-  const oldId=story.coverMediaId||'';
-  const oldCover=story.cover||'';
-  const oldSummary=story.summary;
-  const oldUpdated=story.updatedAt;
-  try{
-    await saveCoverRecord(newId,file);
-    story.coverMediaId=newId;
-    story.cover='';
-    story.updatedAt=Date.now();
-    if(!persist(null)){
-      story.coverMediaId=oldId;
-      story.cover=oldCover;
-      story.summary=oldSummary;
-      story.updatedAt=oldUpdated;
-      await deleteCoverRecord(newId).catch(()=>{});
-      return;
-    }
-    localCoverUrls.set(newId,URL.createObjectURL(file));
-    if(oldId&&!state.stories.some(item=>item.id!==story.id&&item.coverMediaId===oldId)){
-      revokeCoverUrl(oldId);
-      try{await deleteCoverRecord(oldId)}catch(error){console.warn('旧封面已替换，但清理旧文件失败：',error)}
-    }
-    render();
-    toast('番外封面已保存到本机，重新进入收藏馆也会保留。');
-  }catch(error){
-    console.error('封面保存失败：',error);
-    story.coverMediaId=oldId;
-    story.cover=oldCover;
-    story.summary=oldSummary;
-    story.updatedAt=oldUpdated;
-    await deleteCoverRecord(newId).catch(()=>{});
-    toast('封面保存失败，请检查浏览器存储空间后重试。');
-  }
-}
-function installCoverPicker(){
-  let input=document.getElementById('storyCoverPicker');
-  if(input)return input;
-  input=document.createElement('input');
-  input.type='file';
-  input.id='storyCoverPicker';
-  input.accept='image/png,image/jpeg,image/gif,image/webp,image/avif';
-  input.hidden=true;
-  input.addEventListener('change',async event=>{
-    const file=event.target.files?.[0];
-    const story=state.stories.find(item=>item.id===pendingCoverStoryId);
-    pendingCoverStoryId=null;
-    if(file&&story)await setStoryCover(story,file);
-    input.value='';
-  });
-  document.body.appendChild(input);
-  return input;
-}
 async function askForPersistentStorage(){
   try{
     if(navigator.storage?.persist)await navigator.storage.persist();
   }catch(error){console.warn('无法申请持久化站点存储权限：',error)}
+}
+async function hydrateStoryCovers(savedIds=null){
+  const ids=savedIds||new Set((await getAudioRecordKeys()).map(String));
+  let changed=false;
+  for(const story of state.stories||[]){
+    const mediaId=story.coverMediaId?String(story.coverMediaId):'';
+    if(mediaId){
+      let url=coverObjectUrls.get(mediaId)||'';
+      if(!url&&ids.has(mediaId)){
+        try{
+          const record=await getAudioRecord(mediaId);
+          if(record?.blob&&String(record.type||record.blob.type||'').startsWith('image/')){
+            url=URL.createObjectURL(record.blob);
+            coverObjectUrls.set(mediaId,url);
+          }
+        }catch(error){console.warn('读取番外封面失败：',error)}
+      }
+      if(url){if(story.cover!==url){story.cover=url;changed=true}}
+      else if(typeof story.cover==='string'&&story.cover.startsWith('blob:')){story.cover='';changed=true}
+    }else if(typeof story.cover==='string'&&story.cover.startsWith('blob:')){
+      // Migrate old ephemeral cover URLs that cannot work after a reload.
+      story.cover='';changed=true;
+    }
+  }
+  if(changed)persist(null);
+  return changed;
 }
 async function initializePersistentAudio(){
   try{
@@ -313,9 +186,10 @@ async function initializePersistentAudio(){
       }else if('audioStored' in track){delete track.audioStored;changed=true}
     }
     if(changed)persist(null);
-    if(changed&&currentPage==='music')render();
+    const coversChanged=await hydrateStoryCovers(savedIds);
+    if((changed||coversChanged)&&['home','stories'].includes(currentPage))render();
   }catch(error){
-    console.warn('本地音频数据库暂不可用：',error);
+    console.warn('本地媒体数据库暂不可用：',error);
     if((state.tracks||[]).some(track=>track.kind==='file')){
       toast('无法访问本地音频存储。请检查应用 WebView 的 IndexedDB 支持后再添加音频。');
     }
@@ -342,6 +216,7 @@ function writeActiveThemeSnapshot(theme){
     return true;
   }catch(e){return false;}
 }
+// Restore the last explicitly applied theme independently from the rest of the library state.
 function getActiveTheme(){
   const snapshot=readActiveThemeSnapshot();
   if(snapshot){
@@ -360,44 +235,120 @@ function getActiveTheme(){
     return theme;
   }
   const theme=state.themes?.find(t=>t.id===state.activeThemeId)
-    ||state.themes?.find(t=>t.active)
-    ||state.themes?.[0]
-    ||null;
+    || state.themes?.find(t=>t.active)
+    || state.themes?.[0]
+    || null;
   if(theme&&state.activeThemeId!==theme.id)state.activeThemeId=theme.id;
   return theme;
 }
-function installModalProtection(){
-  let style=document.getElementById('modalProtectionStyle');
-  if(!style){style=document.createElement('style');style.id='modalProtectionStyle';}
+function applyActiveTheme(theme=getActiveTheme()){
+  // A saved/applied theme replaces the temporary editor preview.
+  document.getElementById('previewThemeStyle')?.remove();
+  let style=document.getElementById('activeThemeStyle');
+  if(!style){style=document.createElement('style');style.id='activeThemeStyle';document.head.appendChild(style);}
+  style.textContent=theme?.css||'';
+  style.dataset.themeId=theme?.id||'';
+  ensureModalProtectionStyles();
+  protectOpenModalControls();
+}
+
+// User themes may accidentally hide modal close/cancel controls. Keep controls
+// usable, while closed dialogs must ALWAYS leave the layout and document flow.
+function ensureModalProtectionStyles(){
+  let style=document.getElementById('modalControlProtectionStyle');
+  if(!style){style=document.createElement('style');style.id='modalControlProtectionStyle';}
   style.textContent=`
-    dialog.modal:not([open]),dialog.reader-modal:not([open]){display:none!important;visibility:hidden!important;pointer-events:none!important}
-    dialog.modal[open],dialog.reader-modal[open]{pointer-events:auto!important}
-    dialog.modal[open]::before,dialog.modal[open]::after,dialog.modal[open] .modal-head::before,dialog.modal[open] .modal-head::after,dialog.modal[open] .modal-actions::before,dialog.modal[open] .modal-actions::after{pointer-events:none!important}
-    dialog.modal[open] .modal-head,dialog.modal[open] .modal-actions{position:relative!important;z-index:2147483000!important;pointer-events:auto!important;visibility:visible!important;opacity:1!important}
-    dialog.modal[open] .modal-head button.icon-btn,dialog.modal[open] form[method="dialog"] button[value="cancel"],dialog.modal[open] button[value="cancel"],dialog.modal[open] #closeReader,dialog.modal[open] #readerDone,dialog.modal[open] #closeSource,dialog.modal[open] button[data-close-dialog],dialog.modal[open] button[data-dialog-close]{display:inline-flex!important;visibility:visible!important;opacity:1!important;pointer-events:auto!important;position:relative!important;z-index:2147483001!important;transform:none!important;clip:auto!important;clip-path:none!important;min-width:38px!important;min-height:38px!important;flex-shrink:0!important;cursor:pointer!important;touch-action:manipulation!important}
+    dialog.modal:not([open]){display:none!important;visibility:hidden!important;pointer-events:none!important;}
+    dialog.modal[open]{display:block!important;visibility:visible!important;pointer-events:auto!important;}
+    dialog.modal::before,dialog.modal::after,
+    dialog.modal .modal-head::before,dialog.modal .modal-head::after,
+    dialog.modal .modal-actions::before,dialog.modal .modal-actions::after{pointer-events:none!important;}
+    dialog.modal[open] .modal-head,dialog.modal[open] .modal-actions{
+      position:relative!important;z-index:2147483000!important;pointer-events:auto!important;
+      visibility:visible!important;opacity:1!important;overflow:visible!important;
+    }
+    dialog.modal[open] .modal-head button.icon-btn,
+    dialog.modal[open] form[method="dialog"] button[value="cancel"],
+    dialog.modal[open] .modal-actions button[value="cancel"],
+    dialog.modal[open] button#closeReader,dialog.modal[open] button#readerDone,
+    dialog.modal[open] button#closeSource,dialog.modal[open] button[data-close-dialog],
+    dialog.modal[open] button[data-dialog-close]{
+      display:inline-flex!important;visibility:visible!important;opacity:1!important;
+      pointer-events:auto!important;position:relative!important;z-index:2147483001!important;
+      transform:none!important;clip:auto!important;clip-path:none!important;
+      min-width:38px!important;min-height:38px!important;flex-shrink:0!important;
+      cursor:pointer!important;touch-action:manipulation!important;
+    }
   `;
+  // Appending it after the active/preview theme makes these rules win conflicts.
   document.head.appendChild(style);
 }
-function installModalDismissHandling(){
-  if(document.documentElement.dataset.modalDismissHandler==='installed')return;
-  document.documentElement.dataset.modalDismissHandler='installed';
-  document.addEventListener('click',function(event){
-    const target=event.target instanceof Element?event.target:null;
-    if(!target)return;
-    const closeButton=target.closest('dialog.modal[open] .modal-head button.icon-btn,dialog.modal[open] form[method="dialog"] button[value="cancel"],dialog.modal[open] button[value="cancel"],dialog.modal[open] #closeReader,dialog.modal[open] #readerDone,dialog.modal[open] #closeSource,dialog.modal[open] button[data-close-dialog],dialog.modal[open] button[data-dialog-close]');
-    if(!closeButton)return;
-    const dialog=closeButton.closest('dialog.modal[open]');
-    if(!dialog)return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    dialog.close('cancel');
-  },true);
-  document.addEventListener('close',event=>{
-    const dialog=event.target;
-    if(dialog instanceof HTMLDialogElement&&dialog.classList.contains('modal'))dialog.style.removeProperty('display');
-  },true);
+function protectOpenModalControls(dialog){
+  const dialogs=dialog?[dialog]:document.querySelectorAll('dialog.modal[open]');
+  const important=(element,property,value)=>element.style.setProperty(property,value,'important');
+  for(const dlg of dialogs){
+    if(!(dlg instanceof HTMLDialogElement)||!dlg.open)continue;
+    // Critical: never set display:block inline on the dialog itself. That style
+    // survives close() and can leave every dismissed dialog stacked at the page bottom.
+    dlg.style.removeProperty('display');
+    important(dlg,'visibility','visible');
+    important(dlg,'opacity','1');
+    important(dlg,'pointer-events','auto');
+    important(dlg,'isolation','isolate');
+    const head=dlg.querySelector('.modal-head');
+    if(head){important(head,'display','flex');important(head,'position','relative');important(head,'z-index','2147483000');important(head,'pointer-events','auto');important(head,'visibility','visible');important(head,'opacity','1');important(head,'overflow','visible');}
+    const form=dlg.querySelector('form');
+    if(form){important(form,'display','block');important(form,'pointer-events','auto');important(form,'visibility','visible');important(form,'opacity','1');}
+    const actions=dlg.querySelector('.modal-actions');
+    if(actions){important(actions,'display','flex');important(actions,'position','relative');important(actions,'z-index','2147483000');important(actions,'pointer-events','auto');important(actions,'visibility','visible');important(actions,'opacity','1');important(actions,'overflow','visible');}
+    const selector='.modal-head button.icon-btn, form[method="dialog"] button[value="cancel"], .modal-actions button[value="cancel"], #closeReader, #readerDone, #closeSource, button[data-close-dialog], button[data-dialog-close]';
+    dlg.querySelectorAll(selector).forEach(button=>{
+      important(button,'display','inline-flex');important(button,'visibility','visible');important(button,'opacity','1');
+      important(button,'pointer-events','auto');important(button,'position','relative');important(button,'z-index','2147483001');
+      important(button,'transform','none');important(button,'clip','auto');important(button,'clip-path','none');
+      important(button,'min-width','38px');important(button,'min-height','38px');important(button,'flex-shrink','0');
+      important(button,'cursor','pointer');important(button,'touch-action','manipulation');
+    });
+  }
 }
+function installModalControlProtection(){
+  ensureModalProtectionStyles();
+  if(typeof HTMLDialogElement!=='undefined'&&!HTMLDialogElement.prototype.showModal.__violetModalProtection){
+    const nativeShowModal=HTMLDialogElement.prototype.showModal;
+    const wrappedShowModal=function(...args){
+      // Clear any stale inline display left by earlier script/theme iterations.
+      this.style.removeProperty('display');
+      const result=nativeShowModal.apply(this,args);
+      ensureModalProtectionStyles();
+      protectOpenModalControls(this);
+      return result;
+    };
+    wrappedShowModal.__violetModalProtection=true;
+    HTMLDialogElement.prototype.showModal=wrappedShowModal;
+  }
+  document.querySelectorAll('dialog.modal').forEach(dlg=>{
+    if(dlg.dataset.modalCleanupBound)return;
+    dlg.dataset.modalCleanupBound='1';
+    dlg.addEventListener('close',()=>{
+      // Drop runtime overrides when dismissed. The CSS guard keeps it out of flow.
+      ['display','visibility','opacity','pointer-events','isolation'].forEach(property=>dlg.style.removeProperty(property));
+      ensureModalProtectionStyles();
+      if(dlg.id==='storyDialog')resetCoverPreview('storyCoverFile','storyCoverPreview');
+      if(dlg.id==='editDialog')resetCoverPreview('editCoverFile','editCoverPreview');
+    });
+  });
+  protectOpenModalControls();
+}
+function closeOnlyThisDialog(dialog){if(dialog instanceof HTMLDialogElement&&dialog.open)dialog.close('cancel');}
+document.addEventListener('click',function(event){
+  const target=event.target instanceof Element?event.target:null;
+  const closeButton=target?.closest('dialog.modal[open] .modal-head button.icon-btn, dialog.modal[open] form[method="dialog"] button[value="cancel"], dialog.modal[open] .modal-actions button[value="cancel"], dialog.modal[open] button#closeReader, dialog.modal[open] button#readerDone, dialog.modal[open] button#closeSource, dialog.modal[open] button[data-close-dialog], dialog.modal[open] button[data-dialog-close]');
+  if(!closeButton)return;
+  const dialog=closeButton.closest('dialog.modal[open]');
+  if(!dialog)return;
+  event.preventDefault();event.stopPropagation();event.stopImmediatePropagation();
+  closeOnlyThisDialog(dialog);
+},true);
 function uid(prefix='id'){return prefix+'-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,7)}
 function esc(s=''){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function toast(s){const el=$('#toast');el.textContent=s;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),2400)}
@@ -406,11 +357,10 @@ function seriesName(id){return state.series.find(s=>s.id===id)?.name||'未分类
 function storyOrderValue(story){const order=story?.order;return order!==undefined&&order!==null&&Number.isFinite(Number(order))?Number(order):(Number(story?.createdAt)||0)}
 function sortedSeriesStories(seriesId){return state.stories.filter(s=>s.seriesId===seriesId).slice().sort((a,b)=>storyOrderValue(a)-storyOrderValue(b))}
 function storyNo(story){const list=sortedSeriesStories(story.seriesId);return Math.max(1,list.findIndex(s=>s.id===story.id)+1)}
-function storySummary(story){const candidates=[story?.summary,story?.description,story?.synopsis,story?.intro,story?.blurb];return String(candidates.find(value=>typeof value==='string'&&value.trim())||'').trim()}
-function storyCoverUrl(story){if(story?.coverMediaId&&localCoverUrls.has(story.coverMediaId))return localCoverUrls.get(story.coverMediaId);const cover=typeof story?.cover==='string'?story.cover:'';return /^https?:\/\//i.test(cover)||/^data:image\/(?:png|jpeg|gif|webp|avif);base64,/i.test(cover)?cover:''}
 function tagsHTML(tags=[]){return `<div class="tags">${tags.map(t=>`<span class="tag">${esc(t)}</span>`).join('')}</div>`}
-function card(story){const n=String(storyNo(story)).padStart(2,'0'),coverUrl=storyCoverUrl(story),summary=storySummary(story);return `<article class="story-card ${state.settings.layout==='text'?'text-card':''}"><div class="cover" ${coverUrl?`style="background-image:url('${esc(coverUrl)}');background-size:cover;background-position:center"`:''}><span class="cover-number">${esc(seriesName(story.seriesId))} · ${n}</span></div><div class="story-info"><div class="series">${esc(seriesName(story.seriesId))} · 第 ${storyNo(story)} 章</div><h3>${esc(story.title)}</h3><p class="summary">${esc(summary||'尚未添加简介。打开故事，开始阅读。')}</p>${tagsHTML(story.tags||[])}<div class="card-footer"><div style="flex:1"><span class="muted">阅读进度 ${story.readProgress||0}%</span><div class="progress"><span style="width:${story.readProgress||0}%"></span></div></div><div class="small-actions"><button data-action="read" data-id="${story.id}" title="阅读">阅读 ↗</button><button data-action="edit" data-id="${story.id}" title="编辑">编辑</button><button data-action="change-cover" data-id="${story.id}" title="更换封面">封面</button><button data-action="music" data-id="${story.id}" title="配乐">♫</button></div></div></div></article>`}
-function headerSection(title,sub,action=''){return `<div class="section-head"><div><h2>${title}</h2><p>${sub}</p></div>${action}`}
+function storySummary(story){return [story?.summary,story?.description,story?.excerpt,story?.subtitle].map(value=>typeof value==='string'?value.trim():'').find(Boolean)||''}
+function card(story){const n=String(storyNo(story)).padStart(2,'0');return `<article class="story-card ${state.settings.layout==='text'?'text-card':''}"><div class="cover" ${story.cover?`style="background-image:url('${esc(story.cover)}');background-size:cover"`:''}><span class="cover-number">${esc(seriesName(story.seriesId))} · ${n}</span></div><div class="story-info"><div class="series">${esc(seriesName(story.seriesId))} · 第 ${storyNo(story)} 章</div><h3>${esc(story.title)}</h3><p class="summary">${esc(storySummary(story)||'尚未添加简介。打开故事，开始阅读。')}</p>${tagsHTML(story.tags||[])}<div class="card-footer"><div style="flex:1"><span class="muted">阅读进度 ${story.readProgress||0}%</span><div class="progress"><span style="width:${story.readProgress||0}%"></span></div></div><div class="small-actions"><button data-action="read" data-id="${story.id}" title="阅读">阅读 ↗</button><button data-action="edit" data-id="${story.id}" title="编辑">编辑</button><button data-action="music" data-id="${story.id}" title="配乐">♫</button></div></div></div></article>`}
+function headerSection(title,sub,action=''){return `<div class="section-head"><div><h2>${title}</h2><p>${sub}</p></div>${action}</div>`}
 function render(){const content=$('#pageContent');$('#pageTitle').textContent=titles[currentPage]||titles.home;$$('.nav-item').forEach(b=>b.classList.toggle('active',b.dataset.page===currentPage));if(currentPage==='home')content.innerHTML=renderHome();if(currentPage==='stories')content.innerHTML=renderStories();if(currentPage==='characters')content.innerHTML=renderCharacters();if(currentPage==='series')content.innerHTML=renderSeries();if(currentPage==='music')content.innerHTML=renderMusic();if(currentPage==='themes')content.innerHTML=renderThemes();if(currentPage==='settings')content.innerHTML=renderSettings();bindContent();bindActionButtons(content)}
 function renderHome(){return `<section class="hero"><div class="hero-copy"><div class="eyebrow">A LITTLE UNIVERSE OF STORIES</div><h2>把喜欢的故事，<br>好好收藏起来。</h2><p>番外、角色、故事系列、专属配乐与阅读主题，都可以在这里找到自己的位置。你的收藏，属于你自己的宇宙。</p><button class="button primary" data-action="new-story">＋ 收藏一篇番外</button> <button class="button secondary" data-action="goto-music">♫ 整理音乐</button></div><img class="hero-art" src="celestial-book-icon.jpg" alt="书本与星辰"></section><div class="stats"><div class="stat"><span>珍藏番外</span><strong>${state.stories.length}</strong></div><div class="stat"><span>故事系列</span><strong>${state.series.length}</strong></div><div class="stat"><span>角色档案</span><strong>${state.characters.length}</strong></div><div class="stat"><span>音乐收藏</span><strong>${state.tracks.length}</strong></div></div>${headerSection('最近收藏','继续阅读，或为故事安排新的配乐。',`<button class="text-button" data-action="goto-stories">查看全部 →</button>`)}<div class="story-grid">${state.stories.slice().sort((a,b)=>b.updatedAt-a.updatedAt).slice(0,3).map(card).join('')}</div><div class="module-grid" style="margin-top:20px"><div class="panel"><h3>✧ 私人签名</h3><div class="signature-big">Violet196</div><p style="text-align:center">A little universe of stories</p></div><div class="panel"><h3>♫ 今日的故事配乐</h3><p>建立你的第一份歌单，把旋律与故事情绪一起珍藏。</p><button class="button secondary" data-action="goto-music">打开音乐馆</button></div></div>`}
 function renderStories(){return `${headerSection('番外收藏','支持 HTML、Markdown、TXT 文件导入与文本粘贴。',`<button class="button primary" data-action="new-story">＋ 导入番外</button>`)}<div class="toolbar"><div class="search"><input id="storySearch" placeholder="搜索标题、简介或标签……"></div><select id="seriesFilter" class="select"><option value="">全部系列</option>${state.series.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('')}</select><select id="sortStories" class="select"><option value="recent">最近更新</option><option value="series">按系列编号</option><option value="title">按标题</option></select><button class="pill ${state.settings.layout==='cover'?'active':''}" data-action="layout-cover">封面卡片</button><button class="pill ${state.settings.layout==='text'?'active':''}" data-action="layout-text">文字卡片</button></div><div id="storyGrid" class="story-grid">${state.stories.map(card).join('')||`<div class="empty"><strong>这里还空着呢</strong>导入第一篇番外，让你的故事有一个家。</div>`}</div>`}
@@ -423,61 +373,145 @@ function renderSettings(){return `${headerSection('设置与备份','优先保�
 function bindContent(){const search=$('#storySearch');if(search)search.addEventListener('input',filterStories);const ms=$('#musicSearch');if(ms)ms.addEventListener('input',()=>{$$('.list-row[data-track]').forEach(el=>el.classList.toggle('hidden',!el.textContent.toLowerCase().includes(ms.value.toLowerCase()))) });const sf=$('#seriesFilter');if(sf)sf.addEventListener('change',filterStories);const sort=$('#sortStories');if(sort)sort.addEventListener('change',filterStories);const ts=$('#themeSelect');if(ts)ts.addEventListener('change',()=>{const t=state.themes.find(t=>t.id===ts.value);$('#themeName').value=t.name;$('#themeCSS').value=t.css});const live=$('#livePreview');if(live)live.addEventListener('change',()=>{state.settings.preview=live.checked?'live':'manual';persist('预览设置已保存')});const css=$('#themeCSS');if(css)css.addEventListener('input',()=>{if($('#livePreview')?.checked)previewCSS()});const lay=$('#settingLayout');if(lay)lay.addEventListener('change',()=>{state.settings.layout=lay.value;persist();render()});const ap=$('#settingAutoPlay');if(ap)ap.addEventListener('change',()=>{state.settings.autoPlay=ap.checked;persist()});const loop=$('#settingLoop');if(loop)loop.addEventListener('change',()=>{state.settings.loop=loop.checked;persist()});const prev=$('#settingPreview');if(prev)prev.addEventListener('change',()=>{state.settings.preview=prev.value;persist()});const fs=$('#settingFontSize');if(fs)fs.addEventListener('change',()=>{state.settings.fontSize=+fs.value;persist()});const restore=$('#restoreFile');if(restore)restore.addEventListener('change',restoreBackup);const grid=$('#pageContent');grid.querySelectorAll('[data-track]').forEach(el=>{el.addEventListener('dragstart',e=>{dragTrackId=el.dataset.track;el.classList.add('dragging');e.dataTransfer.setData('text/plain',dragTrackId)});el.addEventListener('dragend',()=>el.classList.remove('dragging'));el.addEventListener('dragover',e=>{e.preventDefault();el.classList.add('drop-target')});el.addEventListener('dragleave',()=>el.classList.remove('drop-target'));el.addEventListener('drop',e=>{e.preventDefault();el.classList.remove('drop-target');if(!dragTrackId||dragTrackId===el.dataset.track)return;const from=state.tracks.findIndex(t=>t.id===dragTrackId),to=state.tracks.findIndex(t=>t.id===el.dataset.track);const [item]=state.tracks.splice(from,1);state.tracks.splice(to,0,item);persist('排序已自动保存');render()})})}
 function filterStories(){const q=($('#storySearch')?.value||'').toLowerCase(),sid=$('#seriesFilter')?.value||'',sort=$('#sortStories')?.value||'recent';let arr=state.stories.filter(s=>{if(sid&&s.seriesId!==sid)return false;const characterNames=state.characters.filter(c=>(s.characterIds||[]).includes(c.id)).map(c=>c.name);const haystack=[s.title,storySummary(s),s.raw,s.body,seriesName(s.seriesId),...(s.tags||[]),...characterNames].join(' ').toLowerCase();return haystack.includes(q)});if(sort==='title')arr.sort((a,b)=>(a.title||'').localeCompare(b.title||''));else if(sort==='series')arr.sort((a,b)=>(a.seriesId||'').localeCompare(b.seriesId||'')||storyNo(a)-storyNo(b));else arr.sort((a,b)=>(b.updatedAt||0)-(a.updatedAt||0));$('#storyGrid').innerHTML=arr.map(card).join('')||'<div class="empty"><strong>没有找到匹配的故事</strong>试试其他关键词或系列。</div>';bindActionButtons($('#storyGrid'))}
 function bindActionButtons(root=document){root.querySelectorAll('[data-action]').forEach(b=>{if(b.dataset.bound)return;b.dataset.bound='1';b.addEventListener('click',()=>action(b.dataset.action,b.dataset.id,b))})}
-function action(name,id,button){const st=state.stories.find(s=>s.id===id);if(name==='change-cover'&&st){pendingCoverStoryId=st.id;const picker=installCoverPicker();picker.value='';picker.click()}if(name==='new-story')openStory();if(name==='goto-stories')go('stories');if(name==='goto-music')go('music');if(name==='read'&&st)openReader(st);if(name==='edit'&&st)openEdit(st);if(name==='music'&&st)openAssociation(st);if(name==='layout-cover'||name==='layout-text'){state.settings.layout=name==='layout-cover'?'cover':'text';persist('卡片布局已保存');render()}if(name==='new-character')editCharacter();if(name==='edit-character')editCharacter(state.characters.find(c=>c.id===id));if(name==='character-stories'){const c=state.characters.find(c=>c.id===id);go('stories');setTimeout(()=>{const inp=$('#storySearch');if(inp){inp.value=c?.name||'';filterStories()}},20)}if(name==='new-series')editSeries();if(name==='edit-series')editSeries(state.series.find(s=>s.id===id));if(name==='move-up-series-story'){const target=state.stories.find(s=>s.id===id);if(target){const list=sortedSeriesStories(target.seriesId),idx=list.findIndex(s=>s.id===id);if(idx>0){const a=list[idx-1],b=list[idx];const temp=a.order??a.createdAt;a.order=b.order??b.createdAt;b.order=temp;persist('系列顺序已保存');render()}else if(idx===0)toast('这已经是本系列的第一篇了')}}if(name==='new-music')$('#musicDialog').showModal();if(name==='new-playlist')editPlaylist();if(name==='open-playlist')editPlaylist(state.playlists.find(p=>p.id===id));if(name==='play-track')playTrack(id);if(name==='delete-track'){if(confirm('删除这首音乐？歌单中的引用也会移除。'))deleteTrackAndMedia(id)}if(name==='add-to-playlist')choosePlaylistForTrack(id);if(name==='new-theme')editTheme();if(name==='edit-theme')editTheme(state.themes.find(t=>t.id===id));if(name==='apply-theme'){const chosen=state.themes.find(t=>t.id===id);if(chosen){state.themes.forEach(t=>t.active=t.id===id);state.activeThemeId=id;const themeSaved=writeActiveThemeSnapshot(chosen);const stateSaved=persist(null);applyActiveTheme(chosen);render();toast(themeSaved||stateSaved?'主题已应用并保存，重新进入也会保留。':'主题已应用到当前页面，但浏览器存储失败；请检查存储空间。')}}if(name==='save-theme')saveTheme();if(name==='preview-css')previewCSS();if(name==='validate-css')validateCSS();if(name==='export-json')exportJSON();if(name==='import-json'){const input=$('#restoreFile');if(input)input.click()}if(name==='export-story')exportStory();if(name==='export-css')exportCSS();if(name==='clear-data')clearData();if(name==='reader-music')openAssociation(st);if(name==='reader-edit'&&st)openEdit(st)}
+function action(name,id,button){const st=state.stories.find(s=>s.id===id);if(name==='new-story')openStory();if(name==='goto-stories')go('stories');if(name==='goto-music')go('music');if(name==='read'&&st)openReader(st);if(name==='edit'&&st)openEdit(st);if(name==='music'&&st)openAssociation(st);if(name==='layout-cover'||name==='layout-text'){state.settings.layout=name==='layout-cover'?'cover':'text';persist('卡片布局已保存');render()}if(name==='new-character')editCharacter();if(name==='edit-character')editCharacter(state.characters.find(c=>c.id===id));if(name==='character-stories'){const c=state.characters.find(c=>c.id===id);go('stories');setTimeout(()=>{const inp=$('#storySearch');if(inp){inp.value=c?.name||'';filterStories()}},20)}if(name==='new-series')editSeries();if(name==='edit-series')editSeries(state.series.find(s=>s.id===id));if(name==='move-up-series-story'){const target=state.stories.find(s=>s.id===id);if(target){const list=sortedSeriesStories(target.seriesId),idx=list.findIndex(s=>s.id===id);if(idx>0){const a=list[idx-1],b=list[idx];const temp=a.order??a.createdAt;a.order=b.order??b.createdAt;b.order=temp;persist('系列顺序已保存');render()}else if(idx===0)toast('这已经是本系列的第一篇了')}}if(name==='new-music')$('#musicDialog').showModal();if(name==='new-playlist')editPlaylist();if(name==='open-playlist')editPlaylist(state.playlists.find(p=>p.id===id));if(name==='play-track')playTrack(id);if(name==='delete-track'){if(confirm('删除这首音乐？歌单中的引用也会移除。'))deleteTrackAndMedia(id)}if(name==='add-to-playlist')choosePlaylistForTrack(id);if(name==='new-theme')editTheme();if(name==='edit-theme')editTheme(state.themes.find(t=>t.id===id));if(name==='apply-theme'){const chosen=state.themes.find(t=>t.id===id);if(chosen){state.themes.forEach(t=>t.active=t.id===id);state.activeThemeId=id;const themeSaved=writeActiveThemeSnapshot(chosen);const stateSaved=persist(null);applyActiveTheme(chosen);render();toast(themeSaved||stateSaved?'主题已应用并保存，重新进入也会保留。':'主题已应用到当前页面，但浏览器存储失败；请检查存储空间。')}}if(name==='save-theme')saveTheme();if(name==='preview-css')previewCSS();if(name==='validate-css')validateCSS();if(name==='export-json')exportJSON();if(name==='import-json'){const input=$('#restoreFile');if(input)input.click()}if(name==='export-story')exportStory();if(name==='export-css')exportCSS();if(name==='clear-data')clearData();if(name==='reader-music')openAssociation(st);if(name==='reader-edit'&&st)openEdit(st)}
 function go(page){currentPage=page;render();window.scrollTo({top:0,behavior:'smooth'})}
-function openStory(){selectedFileText='';$('#storyForm').reset();$('#storySeries').innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('');$('#pastePane').hidden=false;$('#filePane').hidden=true;$$('[data-import-tab]').forEach(b=>b.classList.toggle('active',b.dataset.importTab==='paste'));$('#storyDialog').showModal()}
-$$('[data-import-tab]').forEach(b=>b.addEventListener('click',()=>{const file=b.dataset.importTab==='file';$('#pastePane').hidden=file;$('#filePane').hidden=!file;$$('[data-import-tab]').forEach(x=>x.classList.toggle('active',x===b))}));$('#storyFile').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;selectedFileText=await f.text();$('#storyForm').elements.body.value=selectedFileText;toast(`已读取 ${f.name}，保存时保留原始内容。`)});
-$('#storyForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget;if(!f.reportValidity())return;const fd=new FormData(f),body=String(fd.get('body')||selectedFileText||'');const title=String(fd.get('title')).trim();if(!title){toast('请填写番外标题');return}const st={id:uid('story'),title,seriesId:String(fd.get('seriesId')||''),characterIds:[],summary:String(fd.get('summary')||fd.get('description')||'').trim(),tags:String(fd.get('tags')||'').split(/[,，]/).map(s=>s.trim()).filter(Boolean),raw:selectedFileText||body,body,createdAt:Date.now(),updatedAt:Date.now(),readProgress:0,cover:'',history:[],music:{mode:'fixed',playlistId:'',trackIds:[],loop:'list',disabled:false}};String(fd.get('characters')||'').split(/[,，]/).map(x=>x.trim()).filter(Boolean).forEach(name=>{let c=state.characters.find(c=>c.name===name);if(!c){c={id:uid('char'),name,description:'',storyIds:[]};state.characters.push(c)}st.characterIds.push(c.id)});state.stories.unshift(st);state.activeStoryId=st.id;persist('番外已收藏');$('#storyDialog').close();go('stories')});
-function renderMarkdown(text){let s=esc(text);s=s.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/^- (.+)$/gm,'<li>$1</li>').replace(/(?:<li>.*?<\/li>\n?)+/gs,m=>'<ul>'+m+'</ul>');return s.split(/\n\s*\n/).map(p=>/^<(h\d|ul|blockquote|pre|table)/.test(p.trim())?p:'<p>'+p.replace(/\n/g,'<br>')+'</p>').join('')}
-function safeInlineStyle(value){
-  return String(value||'').split(';').map(part=>part.trim()).filter(part=>{
-    if(!part)return false;
-    const colon=part.indexOf(':');if(colon<1)return false;
-    const property=part.slice(0,colon).trim().toLowerCase();
-    const val=part.slice(colon+1).trim();
-    if(/^(?:position|z-index|pointer-events|behavior|-moz-binding|content|cursor)$/i.test(property))return false;
-    if(/(?:expression\s*\(|url\s*\(|@import|javascript:|vbscript:|data:)/i.test(val))return false;
-    if(property==='display'&&/^(?:none|contents)$/i.test(val))return false;
-    if(property==='opacity'&&Number(val)<0.15)return false;
-    return true;
-  }).join('; ');
+function addFieldLabel(text,id,type='text',accept=''){
+  const label=document.createElement('label');label.className='story-extra-field';
+  const caption=document.createElement('span');caption.textContent=text;label.appendChild(caption);
+  if(type==='textarea'){
+    const input=document.createElement('textarea');input.id=id;input.rows=2;input.maxLength=1200;input.placeholder='可选；会显示在番外卡片简介中。';label.appendChild(input);
+  }else{
+    const input=document.createElement('input');input.id=id;input.type=type;if(accept)input.accept=accept;label.appendChild(input);
+  }
+  return label;
 }
+function addCoverPreview(id){
+  const box=document.createElement('div');box.id=id;box.className='cover-upload-preview';box.hidden=true;
+  box.style.cssText='margin:8px 0 12px;';
+  const img=document.createElement('img');img.alt='番外封面预览';img.style.cssText='display:block;max-width:100%;max-height:180px;object-fit:contain;border-radius:12px;';
+  box.appendChild(img);return box;
+}
+function ensureStoryMediaFields(){
+  const storyForm=$('#storyForm');
+  if(storyForm&&!$('#storyCoverFile')){
+    const label=addFieldLabel('上传番外封面（PNG / JPG / WEBP / GIF）','storyCoverFile','file','image/png,image/jpeg,image/webp,image/gif,image/avif');
+    const check=storyForm.querySelector('input[name="cover"]')?.closest('label');
+    if(check)check.insertAdjacentElement('afterend',label);else storyForm.querySelector('.modal-actions')?.before(label);
+    label.insertAdjacentElement('afterend',addCoverPreview('storyCoverPreview'));
+  }
+  const editForm=$('#editForm');
+  if(editForm&&!$('#editSummary')){
+    const summaryLabel=addFieldLabel('番外简介','editSummary','textarea');
+    const bodyLabel=editForm.querySelector('textarea[name="body"]')?.closest('label');
+    if(bodyLabel)bodyLabel.insertAdjacentElement('afterend',summaryLabel);else editForm.querySelector('.modal-actions')?.before(summaryLabel);
+  }
+  if(editForm&&!$('#editCoverFile')){
+    const label=addFieldLabel('更换番外封面（可选）','editCoverFile','file','image/png,image/jpeg,image/webp,image/gif,image/avif');
+    const preview=addCoverPreview('editCoverPreview');
+    const actions=editForm.querySelector('.modal-actions');
+    if(actions){actions.before(label);actions.before(preview)}else editForm.append(label,preview);
+  }
+  for(const [inputId,previewId] of [['storyCoverFile','storyCoverPreview'],['editCoverFile','editCoverPreview']]){
+    const input=$('#'+inputId);if(input&&!input.dataset.coverPreviewBound){
+      input.dataset.coverPreviewBound='1';input.addEventListener('change',()=>previewCoverSelection(inputId,previewId));
+    }
+  }
+}
+function previewCoverSelection(inputId,previewId){
+  const input=$('#'+inputId),preview=$('#'+previewId);if(!input||!preview)return;
+  const oldUrl=coverPreviewUrls.get(inputId);if(oldUrl){URL.revokeObjectURL(oldUrl);coverPreviewUrls.delete(inputId)}
+  const file=input.files?.[0];
+  if(!file){preview.hidden=true;return;}
+  if(!/^image\/(?:png|jpeg|webp|gif|avif)$/i.test(file.type||'')){toast('封面仅支持 PNG、JPG、WEBP、GIF 或 AVIF 图片。');input.value='';preview.hidden=true;return;}
+  const url=URL.createObjectURL(file);coverPreviewUrls.set(inputId,url);preview.querySelector('img').src=url;preview.hidden=false;
+}
+function resetCoverPreview(inputId,previewId){
+  const input=$('#'+inputId),preview=$('#'+previewId),url=coverPreviewUrls.get(inputId);
+  if(url){URL.revokeObjectURL(url);coverPreviewUrls.delete(inputId)}
+  if(input)input.value='';if(preview){preview.hidden=true;const img=preview.querySelector('img');if(img)img.removeAttribute('src')}
+}
+async function storeCoverFile(file){
+  if(!file)return null;
+  if(!/^image\/(?:png|jpeg|webp|gif|avif)$/i.test(file.type||''))throw new Error('封面仅支持 PNG、JPG、WEBP、GIF 或 AVIF 图片。');
+  const id=uid('cover');
+  await saveAudioRecord(id,file);
+  const url=URL.createObjectURL(file);coverObjectUrls.set(id,url);
+  await askForPersistentStorage();
+  return {id,url};
+}
+async function discardCoverMedia(id){
+  if(!id)return;
+  const url=coverObjectUrls.get(id);if(url){URL.revokeObjectURL(url);coverObjectUrls.delete(id)}
+  try{await deleteAudioRecord(id)}catch(error){console.warn('清理临时封面媒体失败：',error)}
+}
+function openStory(){selectedFileText='';$('#storyForm').reset();$('#storySeries').innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}">${esc(s.name)}</option>`).join('');$('#pastePane').hidden=false;$('#filePane').hidden=true;resetCoverPreview('storyCoverFile','storyCoverPreview');$$('[data-import-tab]').forEach(b=>b.classList.toggle('active',b.dataset.importTab==='paste'));$('#storyDialog').showModal()}
+ensureStoryMediaFields();
+$$('[data-import-tab]').forEach(b=>b.addEventListener('click',()=>{const file=b.dataset.importTab==='file';$('#pastePane').hidden=file;$('#filePane').hidden=!file;$$('[data-import-tab]').forEach(x=>x.classList.toggle('active',x===b))}));$('#storyFile').addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;selectedFileText=await f.text();$('#storyForm').elements.body.value=selectedFileText;toast(`已读取 ${f.name}，保存时保留原始内容。`)});
+$('#storyForm').addEventListener('submit',async e=>{
+  e.preventDefault();const f=e.currentTarget;if(!f.reportValidity())return;
+  const fd=new FormData(f),body=String(fd.get('body')||selectedFileText||''),title=String(fd.get('title')||'').trim();
+  if(!title){toast('请填写番外标题');return}
+  let coverMedia=null;
+  const coverFile=$('#storyCoverFile')?.files?.[0];
+  if(coverFile){try{coverMedia=await storeCoverFile(coverFile)}catch(error){console.error('保存番外封面失败：',error);toast('封面保存失败：'+(error?.message||'请检查图片与本地存储权限。'));return}}
+  const st={id:uid('story'),title,seriesId:String(fd.get('seriesId')||''),characterIds:[],summary:String(fd.get('summary')||'').trim(),tags:String(fd.get('tags')||'').split(/[,，]/).map(s=>s.trim()).filter(Boolean),raw:selectedFileText||body,body,createdAt:Date.now(),updatedAt:Date.now(),readProgress:0,cover:coverMedia?.url||'',coverMediaId:coverMedia?.id||'',history:[],music:{mode:'fixed',playlistId:'',trackIds:[],loop:'list',disabled:false}};
+  String(fd.get('characters')||'').split(/[,，]/).map(x=>x.trim()).filter(Boolean).forEach(name=>{let c=state.characters.find(c=>c.name===name);if(!c){c={id:uid('char'),name,description:'',storyIds:[]};state.characters.push(c)}st.characterIds.push(c.id)});
+  state.stories.unshift(st);state.activeStoryId=st.id;
+  if(!persist(null)){state.stories=state.stories.filter(item=>item.id!==st.id);if(coverMedia)await discardCoverMedia(coverMedia.id);return}
+  toast('番外已收藏');$('#storyDialog').close();go('stories');
+});
+function renderMarkdown(text){let s=esc(text);s=s.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/^- (.+)$/gm,'<li>$1</li>').replace(/(?:<li>.*?<\/li>\n?)+/gs,m=>'<ul>'+m+'</ul>');return s.split(/\n\s*\n/).map(p=>/^<(h\d|ul|blockquote|pre|table)/.test(p.trim())?p:'<p>'+p.replace(/\n/g,'<br>')+'</p>').join('')}
 function safeHtml(source){
   const doc=new DOMParser().parseFromString(String(source||''),'text/html');
-  doc.querySelectorAll('script,iframe,object,embed,form,base,meta[http-equiv],link,style').forEach(n=>n.remove());
+  // Never allow imported stylesheets/scripts to leak into the app shell.
+  doc.querySelectorAll('script,style,link[rel="stylesheet"],iframe,object,embed,form,base,meta[http-equiv]').forEach(n=>n.remove());
+  const safeRasterDataImage=value=>/^data:image\/(?:png|jpe?g|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(value||'');
   doc.querySelectorAll('*').forEach(el=>{
     [...el.attributes].forEach(a=>{
-      const name=a.name.toLowerCase(),value=a.value||'';
-      if(name.startsWith('on')){el.removeAttribute(a.name);return;}
-      if(name==='style'){
-        const clean=safeInlineStyle(value);
-        if(clean)el.setAttribute('style',clean);else el.removeAttribute('style');
-        return;
-      }
-      if(['href','src','xlink:href','formaction'].includes(name)){
-        const trimmed=value.trim();
-        const safeDataImage=name==='src'&&/^data:image\/(?:png|jpeg|gif|webp|avif);base64,[a-z0-9+/=\s]+$/i.test(trimmed);
-        if(/^\s*(?:javascript|vbscript|file):/i.test(trimmed)||(/^\s*data:/i.test(trimmed)&&!safeDataImage)||/^\s*blob:/i.test(trimmed))el.removeAttribute(a.name);
-      }
+      if(/^on/i.test(a.name)){el.removeAttribute(a.name);return;}
+      if(!['href','src','xlink:href'].includes(a.name))return;
+      const value=(a.value||'').trim();
+      if(/^\s*(?:javascript|vbscript):/i.test(value)){el.removeAttribute(a.name);return;}
+      if(/^data:/i.test(value)&&!(a.name==='src'&&el.tagName==='IMG'&&safeRasterDataImage(value)))el.removeAttribute(a.name);
     });
-    if(el.tagName==='IMG'){
-      el.removeAttribute('srcset');
-      el.setAttribute('loading','lazy');
-      el.setAttribute('decoding','async');
-    }
   });
   return doc.body.innerHTML;
 }
 function bodyHTML(st){
-  const raw=String(st?.body||'');
-  const containsHtml=/<\s*(?:!doctype\s+html|html|head|body|p|div|span|a|img|br|hr|strong|b|em|i|u|s|small|sup|sub|mark|del|ins|h[1-6]|blockquote|article|section|header|footer|main|aside|ul|ol|li|table|thead|tbody|tfoot|tr|th|td|pre|code|figure|figcaption|details|summary)\b[^>]*>/i.test(raw);
-  if(containsHtml)return safeHtml(raw);
+  const raw=String(st?.body??'');
+  // Detect any real HTML fragment, including inline-only tags such as span,
+  // em, strong, img and br. The earlier allow-list missed these and escaped them.
+  if(/<\/?[a-z][a-z0-9:-]*(?:\s[^<>]*?)?\s*\/?>/i.test(raw))return safeHtml(raw);
   return renderMarkdown(raw);
 }
 function openReader(st){readerId=st.id;state.activeStoryId=st.id;$('#readerMeta').textContent=`${seriesName(st.seriesId)} · 第 ${storyNo(st)} 章`;$('#readerTitle').textContent=st.title;const readerBody=$('#readerBody');readerBody.innerHTML=bodyHTML(st);readerBody.scrollTop=0;$('#readProgress').textContent=`阅读进度 ${st.readProgress||0}%`;$('#readerDialog').showModal();readerBody.onscroll=()=>{const height=Math.max(readerBody.scrollHeight,1);const ratio=Math.min(100,Math.round((readerBody.scrollTop+readerBody.clientHeight)/height*100));const previous=Number(st.readProgress)||0;if(ratio>previous){st.readProgress=ratio;st.updatedAt=Date.now();$('#readProgress').textContent=`阅读进度 ${ratio}%`;clearTimeout(readerProgressTimer);readerProgressTimer=setTimeout(()=>{persist(null);readerProgressTimer=null},400)}};}
 $('#closeReader').onclick=$('#readerDone').onclick=()=>$('#readerDialog').close();$('#markRead').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st){st.readProgress=100;st.updatedAt=Date.now();persist('已标记读完');$('#readProgress').textContent='阅读进度 100%'}};$('#readerSource').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);$('#sourceText').textContent=st?.raw||'';$('#sourceDialog').showModal()};$('#closeSource').onclick=()=>$('#sourceDialog').close();$('#readerEdit').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openEdit(st)};$('#readerMusic').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openAssociation(st)};
-function openEdit(st){editingId=st.id;const f=$('#editForm');f.elements.title.value=st.title;f.elements.body.value=st.body;f.elements.mode.value='text';f.elements.seriesId.innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}" ${s.id===st.seriesId?'selected':''}>${esc(s.name)}</option>`).join('');$('#editDialog').showModal()}
-$('#editForm').elements.body.addEventListener('input',()=>{if(editingId){try{localStorage.setItem(KEY+'-draft-'+editingId,$('#editForm').elements.body.value)}catch{}}});$('#saveEdit').addEventListener('click',e=>{e.preventDefault();const st=state.stories.find(s=>s.id===editingId);if(!st)return;st.history=[...(st.history||[]).slice(-0),{title:st.title,body:st.body,updatedAt:st.updatedAt}].slice(-1);st.title=$('#editForm').elements.title.value.trim();st.body=$('#editForm').elements.body.value;st.seriesId=$('#editForm').elements.seriesId.value;st.updatedAt=Date.now();try{localStorage.removeItem(KEY+'-draft-'+editingId)}catch{}persist('修改已保存；上一版本已备份');$('#editDialog').close();render();if($('#readerDialog').open)openReader(st)});
+function openEdit(st){
+  ensureStoryMediaFields();editingId=st.id;const f=$('#editForm');
+  f.elements.title.value=st.title;f.elements.body.value=st.body;f.elements.mode.value='text';
+  if($('#editSummary'))$('#editSummary').value=storySummary(st);
+  f.elements.seriesId.innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}" ${s.id===st.seriesId?'selected':''}>${esc(s.name)}</option>`).join('');
+  resetCoverPreview('editCoverFile','editCoverPreview');
+  const preview=$('#editCoverPreview');if(preview&&st.cover){preview.querySelector('img').src=st.cover;preview.hidden=false}
+  $('#editDialog').showModal();
+}
+$('#editForm').elements.body.addEventListener('input',()=>{if(editingId){try{localStorage.setItem(KEY+'-draft-'+editingId,$('#editForm').elements.body.value)}catch{}}});
+$('#saveEdit').addEventListener('click',async e=>{
+  e.preventDefault();const st=state.stories.find(s=>s.id===editingId);if(!st)return;
+  const newTitle=$('#editForm').elements.title.value.trim();if(!newTitle){toast('请填写番外标题');$('#editForm').elements.title.focus();return}
+  const before={title:st.title,body:st.body,summary:st.summary,description:st.description,seriesId:st.seriesId,updatedAt:st.updatedAt,history:[...(st.history||[])],cover:st.cover,coverMediaId:st.coverMediaId};
+  const coverFile=$('#editCoverFile')?.files?.[0];let newCover=null;
+  if(coverFile){try{newCover=await storeCoverFile(coverFile)}catch(error){console.error('保存新封面失败：',error);toast('封面保存失败：'+(error?.message||'请检查图片与本地存储权限。'));return}}
+  st.history=[...(st.history||[]),{title:st.title,body:st.body,summary:storySummary(st),updatedAt:st.updatedAt}].slice(-1);
+  st.title=newTitle;st.body=$('#editForm').elements.body.value;st.summary=$('#editSummary')?.value.trim()||'';delete st.description;st.seriesId=$('#editForm').elements.seriesId.value;st.updatedAt=Date.now();
+  if(newCover){st.cover=newCover.url;st.coverMediaId=newCover.id}
+  if(!persist(null)){
+    Object.assign(st,before);if(newCover)await discardCoverMedia(newCover.id);return;
+  }
+  if(newCover&&before.coverMediaId&&before.coverMediaId!==newCover.id)await discardCoverMedia(before.coverMediaId);
+  try{localStorage.removeItem(KEY+'-draft-'+editingId)}catch{}
+  toast('修改已保存；上一版本已备份');$('#editDialog').close();render();if($('#readerDialog').open)openReader(st);
+});
 function openAssociation(st){$('#associationStoryName').textContent=st.title;$('#associationPlaylist').innerHTML='<option value="">不关联歌单</option>'+state.playlists.map(p=>`<option value="${p.id}" ${p.id===st.music?.playlistId?'selected':''}>${esc(p.name)}</option>`).join('');const f=$('#associationForm');f.elements.mode.value=st.music?.mode||'fixed';f.elements.loop.value=st.music?.loop||'list';f.dataset.storyId=st.id;$('#associationDialog').showModal()}
 $('#associationForm').addEventListener('submit',e=>{e.preventDefault();const f=e.currentTarget,st=state.stories.find(s=>s.id===f.dataset.storyId);if(!st)return;const pl=state.playlists.find(p=>p.id===f.elements.playlistId.value);st.music={...(st.music||{}),mode:f.elements.mode.value,playlistId:pl?.id||'',trackIds:f.elements.mode.value==='fixed'?[...(pl?.trackIds||[])]:[],loop:f.elements.loop.value,disabled:!pl};persist('番外配乐设置已保存');$('#associationDialog').close();render()});
 async function deleteTrackAndMedia(id){
@@ -493,6 +527,7 @@ async function deleteTrackAndMedia(id){
     state.tracks=previousTracks;state.playlists=previousPlaylists;state.player=previousPlayer;
     return;
   }
+  if(state.player?.trackId!==id&&previousPlayer?.trackId===id){/* player metadata was cleared above */}
   if(previousPlayer?.trackId===id){audio.pause();audio.removeAttribute('src');audio.load()}
   const objectUrl=localTrackUrls.get(id);
   if(objectUrl){URL.revokeObjectURL(objectUrl);localTrackUrls.delete(id)}
@@ -505,6 +540,7 @@ async function deleteTrackAndMedia(id){
   }
   render();
 }
+
 function editCharacter(c){const name=prompt('角色名称',c?.name||'');if(!name?.trim())return;const desc=prompt('角色简介（可选）',c?.description||'')||'';if(c){c.name=name.trim();c.description=desc}else state.characters.push({id:uid('char'),name:name.trim(),description:desc,storyIds:[]});persist('角色档案已保存');render()}
 function editSeries(s){const name=prompt('故事系列名称',s?.name||'');if(!name?.trim())return;if(s)s.name=name.trim();else state.series.push({id:uid('series'),name:name.trim(),themeId:''});persist('故事系列已保存');render()}
 function editPlaylist(p){const name=prompt('歌单名称',p?.name||'');if(!name?.trim())return;const description=prompt('歌单描述（可选）',p?.description||'')||'';if(p){p.name=name.trim();p.description=description}else state.playlists.push({id:uid('playlist'),name:name.trim(),description,trackIds:[]});persist('歌单已保存');render()}
@@ -555,9 +591,13 @@ async function playTrack(id){
   if(!url){toast(t.kind==='file'?'这首音乐没有找到已保存的音频文件。它来自旧版本，请重新添加一次。':'请填写有效的音频直链。');return}
   audio.pause();audio.src=url;audio.load();
   audio.play().then(()=>{state.player={trackId:id,isPlaying:true,position:0};persist('开始播放：'+t.title);showPlayer(t)}).catch(error=>{console.warn('音频播放未启动：',error);showPlayer(t);toast('浏览器可能要求再次点击播放，或该链接不可直接播放。')});
-}function showPlayer(t){let p=$('#playerPanel');if(!p){p=document.createElement('div');p.id='playerPanel';p.className='player-panel';document.body.append(p)}p.hidden=false;p.innerHTML=`<h3>${esc(t?.title||'音乐播放器')}</h3><div class="muted">${esc(t?.kind==='url'?'网络音频':'本地音频')} · 当前原型</div><div class="player-controls"><button data-player="prev">|◀</button><button class="play" data-player="toggle">${audio.paused?'▶':'Ⅱ'}</button><button data-player="next">▶|</button></div><input type="range" id="playerSeek" min="0" max="100" value="0"><div class="audio-status">播放进度 · 同一首音乐切换故事时可沿用播放状态（原生后台播放待实现）</div><button class="text-button" id="closePlayer">收起播放器</button>`;p.querySelector('[data-player=toggle]').onclick=()=>{if(audio.paused)audio.play();else audio.pause();showPlayer(t)};p.querySelector('[data-player=prev]').onclick=()=>stepTrack(-1);p.querySelector('[data-player=next]').onclick=()=>stepTrack(1);p.querySelector('#closePlayer').onclick=()=>p.hidden=true;p.querySelector('#playerSeek').oninput=e=>{if(audio.duration)audio.currentTime=audio.duration*e.target.value/100};audio.ontimeupdate=()=>{const r=$('#playerSeek');if(r&&audio.duration)r.value=audio.currentTime/audio.duration*100};audio.onended=()=>{const current=state.tracks.findIndex(x=>x.id===state.player.trackId);if(current>=0&&current<state.tracks.length-1)playTrack(state.tracks[current+1].id);else if(state.settings.loop&&state.tracks.length)playTrack(state.tracks[0].id);else state.player.isPlaying=false}}
+}
+function showPlayer(t){let p=$('#playerPanel');if(!p){p=document.createElement('div');p.id='playerPanel';p.className='player-panel';document.body.append(p)}p.hidden=false;p.innerHTML=`<h3>${esc(t?.title||'音乐播放器')}</h3><div class="muted">${esc(t?.kind==='url'?'网络音频':'本地音频')} · 当前原型</div><div class="player-controls"><button data-player="prev">|◀</button><button class="play" data-player="toggle">${audio.paused?'▶':'Ⅱ'}</button><button data-player="next">▶|</button></div><input type="range" id="playerSeek" min="0" max="100" value="0"><div class="audio-status">播放进度 · 同一首音乐切换故事时可沿用播放状态（原生后台播放待实现）</div><button class="text-button" id="closePlayer">收起播放器</button>`;p.querySelector('[data-player=toggle]').onclick=()=>{if(audio.paused)audio.play();else audio.pause();showPlayer(t)};p.querySelector('[data-player=prev]').onclick=()=>stepTrack(-1);p.querySelector('[data-player=next]').onclick=()=>stepTrack(1);p.querySelector('#closePlayer').onclick=()=>p.hidden=true;p.querySelector('#playerSeek').oninput=e=>{if(audio.duration)audio.currentTime=audio.duration*e.target.value/100};audio.ontimeupdate=()=>{const r=$('#playerSeek');if(r&&audio.duration)r.value=audio.currentTime/audio.duration*100};audio.onended=()=>{const current=state.tracks.findIndex(x=>x.id===state.player.trackId);if(current>=0&&current<state.tracks.length-1)playTrack(state.tracks[current+1].id);else if(state.settings.loop&&state.tracks.length)playTrack(state.tracks[0].id);else state.player.isPlaying=false}}
 function stepTrack(dir){const idx=state.tracks.findIndex(t=>t.id===state.player.trackId),next=state.tracks[idx+dir];if(next)playTrack(next.id)}$('#playerFab').onclick=()=>{const t=state.tracks.find(t=>t.id===state.player.trackId)||state.tracks[0];showPlayer(t)};
-function editTheme(t){if(!t){const name=prompt('新主题名称','我的月光主题');if(!name?.trim())return;t={id:uid('theme'),name:name.trim(),type:'reading',css:':root {\n  --paper: #fbf8f1;\n  --ink: #26394e;\n  --lav: #b19ad9;\n}\n.story-header { text-align: center; }',active:false};state.themes.push(t);persist('主题草稿已创建')}render();setTimeout(()=>{if(t)$('#themeSelect').value=t.id;$('#themeName').value=t.name;$('#themeCSS').value=t.css},0)}function previewCSS(){const css=$('#themeCSS')?.value;if(css===undefined)return;let style=$('#previewThemeStyle');if(!style){style=document.createElement('style');style.id='previewThemeStyle';document.head.append(style)}style.textContent=css;installModalProtection();toast('已应用到当前预览（尚未覆盖正式主题）')}function validateCSS(){const css=$('#themeCSS')?.value||'';let n=0;for(const c of css){if(c==='{')n++;if(c==='}')n--;if(n<0)break}if(n!==0||/javascript\s*:/i.test(css)){toast('检查到括号不匹配或可疑内容，请检查 CSS。');return}toast('基础检查通过；复杂 CSS 冲突仍需更完整的解析器。')}function saveTheme(){const id=$('#themeSelect')?.value,t=state.themes.find(t=>t.id===id);if(!t)return;t.name=$('#themeName').value.trim()||t.name;t.css=$('#themeCSS').value;state.themes.forEach(x=>x.active=x.id===id);state.activeThemeId=id;const themeSaved=writeActiveThemeSnapshot(t);const stateSaved=persist(null);applyActiveTheme(t);render();toast(themeSaved||stateSaved?'主题已保存并应用，重新进入也会保留。':'主题已应用到当前页面，但浏览器存储失败；请检查存储空间。')}
+function editTheme(t){if(!t){const name=prompt('新主题名称','我的月光主题');if(!name?.trim())return;t={id:uid('theme'),name:name.trim(),type:'reading',css:':root {\n  --paper: #fbf8f1;\n  --ink: #26394e;\n  --lav: #b19ad9;\n}\n.story-header { text-align: center; }',active:false};state.themes.push(t);persist('主题草稿已创建')}render();setTimeout(()=>{if(t)$('#themeSelect').value=t.id;$('#themeName').value=t.name;$('#themeCSS').value=t.css},0)}
+function previewCSS(){const css=$('#themeCSS')?.value;if(css===undefined)return;let style=$('#previewThemeStyle');if(!style){style=document.createElement('style');style.id='previewThemeStyle';document.head.append(style)}style.textContent=css;ensureModalProtectionStyles();protectOpenModalControls();toast('已应用到当前预览（尚未覆盖正式主题）')}
+function validateCSS(){const css=$('#themeCSS')?.value||'';let n=0;for(const c of css){if(c==='{')n++;if(c==='}')n--;if(n<0)break}if(n!==0||/javascript\s*:/i.test(css)){toast('检查到括号不匹配或可疑内容，请检查 CSS。');return}toast('基础检查通过；复杂 CSS 冲突仍需更完整的解析器。')}
+function saveTheme(){const id=$('#themeSelect')?.value,t=state.themes.find(t=>t.id===id);if(!t)return;t.name=$('#themeName').value.trim()||t.name;t.css=$('#themeCSS').value;state.themes.forEach(x=>x.active=x.id===id);state.activeThemeId=id;const themeSaved=writeActiveThemeSnapshot(t);const stateSaved=persist(null);applyActiveTheme(t);render();toast(themeSaved||stateSaved?'主题已保存并应用，重新进入也会保留。':'主题已应用到当前页面，但浏览器存储失败；请检查存储空间。')}
 function download(name,blob){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
 function exportJSON(){const data=JSON.stringify(stateForStorage(),null,2);download('Violets-Storybook-backup.json',new Blob([data],{type:'application/json'}));toast('JSON 数据备份已导出；本机音频文件保存在设备数据库中，不包含在 JSON 内。')}
 function exportStory(){const s=state.stories.find(s=>s.id===state.activeStoryId)||state.stories[0];if(!s){toast('没有可导出的番外');return}download((s.title||'story').replace(/[\\/:*?"<>|]/g,'_')+'.md',new Blob([s.body||''],{type:'text/markdown;charset=utf-8'}))}
@@ -600,22 +640,24 @@ async function restoreBackup(e){
       const active=nextState.themes.find(t=>t.active)||nextState.themes[0];
       nextState.activeThemeId=active?.id||'';
     }
+    // JSON backups contain metadata, not audio bytes. Reattach matching files already
+    // present in this installation's IndexedDB; mark unavailable ones clearly.
     let localAudioIds=new Set();
     try{localAudioIds=new Set((await getAudioRecordKeys()).map(String))}
     catch(error){console.warn('恢复备份时无法读取现有本地音频：',error)}
     nextState.tracks=nextState.tracks.map(track=>track.kind==='file'
       ?{...track,audioStored:localAudioIds.has(String(track.id))}
       :track);
-    const keepAudioIds=nextState.tracks.filter(track=>track.kind==='file').map(track=>track.id);
+    const keepAudioIds=[...nextState.tracks.filter(track=>track.kind==='file').map(track=>track.id),...nextState.stories.map(story=>story.coverMediaId).filter(Boolean)];
     const serialized=JSON.stringify(stateForStorage(nextState));
+    // Only update the in-memory state after localStorage accepts the complete backup.
     localStorage.setItem(KEY,serialized);
     audio.pause();audio.removeAttribute('src');audio.load();
     localTrackUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));localTrackUrls.clear();
-    localCoverUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));localCoverUrls.clear();
+    coverObjectUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));coverObjectUrls.clear();
     state=nextState;
-    try{await pruneAudioRecords(keepAudioIds)}catch(error){console.warn('备份恢复后清理未引用音频失败：',error)}
-    try{await pruneCoverRecords(nextState.stories.map(story=>story.coverMediaId).filter(Boolean))}catch(error){console.warn('备份恢复后清理未引用封面失败：',error)}
-    await initializePersistentCovers(false);
+    try{await pruneAudioRecords(keepAudioIds)}catch(error){console.warn('备份恢复后清理未引用媒体失败：',error)}
+    try{await hydrateStoryCovers(new Set((await getAudioRecordKeys()).map(String)))}catch(error){console.warn('恢复后的封面暂时无法重新载入：',error)}
     currentPage=validPages.includes(state.activePage)?state.activePage:'home';
     const restoredTheme=state.themes.find(t=>t.id===state.activeThemeId)||state.themes.find(t=>t.active)||state.themes[0]||null;
     if(restoredTheme){
@@ -643,20 +685,33 @@ async function clearData(){
   try{localStorage.removeItem(ACTIVE_THEME_KEY)}catch(e){}
   audio.pause();audio.removeAttribute('src');audio.load();
   localTrackUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));localTrackUrls.clear();
-  localCoverUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));localCoverUrls.clear();
+  coverObjectUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));coverObjectUrls.clear();
+  coverPreviewUrls.forEach(objectUrl=>URL.revokeObjectURL(objectUrl));coverPreviewUrls.clear();
   document.getElementById('previewThemeStyle')?.remove();
-  try{await Promise.all([clearAudioRecords(),pruneCoverRecords([])]);toast('收藏数据、封面与本机音频均已清除。')}
-  catch(error){console.error('清理本地媒体失败：',error);toast('收藏数据已清除，但部分本机媒体清理失败。')}
+  try{await clearAudioRecords();toast('收藏数据与本机音频均已清除。')}
+  catch(error){console.error('清理本地音频失败：',error);toast('收藏数据已清除，但本机音频数据库清理失败。')}
   applyActiveTheme(state.themes[0]||null);render();
 }
 $('#quickImport').onclick=openStory;
 $('#nav').addEventListener('click',e=>{const b=e.target.closest('[data-page]');if(b)go(b.dataset.page)});
-installModalDismissHandling();
-installModalProtection();
-installCoverPicker();
+// Handle X and Cancel in the capture phase so method="dialog" form validation,
+// theme click handlers, and native submit behavior cannot prevent dismissal.
+// Close only the nearest dialog, so source/read overlays close independently.
+document.addEventListener('click',function(event){
+  const target=event.target instanceof Element?event.target:null;
+  const closeButton=target?.closest('dialog.modal[open] .modal-head button.icon-btn, dialog.modal[open] form[method="dialog"] button[value="cancel"], dialog.modal[open] .modal-actions button[value="cancel"], dialog.modal[open] button#closeReader, dialog.modal[open] button#readerDone, dialog.modal[open] button#closeSource, dialog.modal[open] button[data-close-dialog], dialog.modal[open] button[data-dialog-close]');
+  if(!closeButton)return;
+  const dialog=closeButton.closest('dialog.modal[open]');
+  if(!dialog)return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.stopImmediatePropagation();
+  closeOnlyThisDialog(dialog);
+},true);
+
 bindActionButtons();
 getActiveTheme();
+installModalControlProtection();
 render();
 applyActiveTheme();
 void initializePersistentAudio();
-void initializePersistentCovers();
