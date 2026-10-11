@@ -331,7 +331,79 @@ $('#storyForm').addEventListener('submit',async e=>{
   if(!persist(null)){state.stories=previousStories;state.characters=previousCharacters;state.activeStoryId=previousActiveStoryId;return}
   toast('番外已收藏');$('#storyDialog').close();go('stories');
 });
-function renderMarkdown(text){let s=esc(text);s=s.replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^> (.+)$/gm,'<blockquote>$1</blockquote>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/\*(.+?)\*/g,'<em>$1</em>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/^- (.+)$/gm,'<li>$1</li>').replace(/(?:<li>.*?<\/li>\n?)+/gs,m=>'<ul>'+m+'</ul>');return s.split(/\n\s*\n/).map(p=>/^<(h\d|ul|blockquote|pre|table)/.test(p.trim())?p:'<p>'+p.replace(/\n/g,'<br>')+'</p>').join('')}
+function renderInlineMarkdown(text){
+  const tokens=[];
+  const protect=html=>{const marker=`VIOLETMDTOKEN${tokens.length}END`;tokens.push([marker,html]);return marker};
+  let source=String(text??'');
+  source=source.replace(/`([^`\n]+)`/g,(_,code)=>protect(`<code>${esc(code)}</code>`));
+  source=source.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+["']([^"']*)["'])?\)/g,(_,alt,url,title)=>{
+    const allowed=/^(?:https?:\/\/|\/|\.\.?\/|data:image\/(?:png|jpe?g|gif|webp|avif);base64,)/i.test(url)&&!/^data:image\/svg/i.test(url);
+    if(!allowed)return protect(esc(`![${alt}](${url})`));
+    return protect(`<img src="${esc(url)}" alt="${esc(alt)}"${title?` title="${esc(title)}"`:''} loading="lazy" style="max-width:100%;height:auto">`);
+  });
+  source=source.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+["']([^"']*)["'])?\)/g,(_,label,url,title)=>{
+    const allowed=/^(?:https?:\/\/|mailto:|tel:|#|\/|\.\.?\/)/i.test(url)&&! /^(?:javascript|vbscript|data):/i.test(url);
+    if(!allowed)return protect(esc(`[${label}](${url})`));
+    return protect(`<a href="${esc(url)}"${title?` title="${esc(title)}"`:''}${/^https?:\/\//i.test(url)?' target="_blank" rel="noopener noreferrer"':''}>${renderInlineMarkdown(label)}</a>`);
+  });
+  let out=esc(source);
+  out=out.replace(/\*\*(.+?)\*\*/gs,'<strong>$1</strong>')
+    .replace(/__(.+?)__/gs,'<strong>$1</strong>')
+    .replace(/~~(.+?)~~/gs,'<del>$1</del>')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g,'$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_\n]+)_(?!_)/g,'$1<em>$2</em>');
+  out=out.replace(/VIOLETMDTOKEN(\d+)END/g,(_,n)=>tokens[Number(n)]?.[1]||'');
+  return out;
+}
+function markdownCells(line){
+  let value=String(line||'').trim();
+  if(value.startsWith('|'))value=value.slice(1);
+  if(value.endsWith('|'))value=value.slice(0,-1);
+  const cells=[];let part='',escaped=false;
+  for(const ch of value){if(escaped){part+=ch;escaped=false;continue}if(ch==='\\'){escaped=true;continue}if(ch==='|'){cells.push(part.trim());part=''}else part+=ch}
+  cells.push(part.trim());return cells;
+}
+function isMarkdownRule(line){return /^\s{0,3}(?:(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})$/.test(line)}
+function isMarkdownBlockStart(lines,index){
+  const line=lines[index]||'';
+  if(/^\s{0,3}(#{1,6})\s+/.test(line)||/^\s{0,3}>/.test(line)||/^\s{0,3}(?:```|~~~)/.test(line)||isMarkdownRule(line))return true;
+  if(/^\s{0,3}(?:[-+*])\s+/.test(line)||/^\s{0,3}\d+[.)]\s+/.test(line))return true;
+  if(index+1<lines.length&&/^\s*(?:=+|-{3,})\s*$/.test(lines[index+1])&&line.trim())return true;
+  if(index+1<lines.length&&line.includes('|')&&/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[index+1]))return true;
+  return false;
+}
+function renderMarkdown(text){
+  const lines=String(text??'').replace(/\r\n?/g,'\n').split('\n');
+  const out=[];let i=0,paragraph=[];
+  const flushParagraph=()=>{if(!paragraph.length)return;const content=paragraph.join('\n').trim();if(content)out.push(`<p>${renderInlineMarkdown(content).replace(/\n/g,'<br>\n')}</p>`);paragraph=[]};
+  while(i<lines.length){
+    const line=lines[i];
+    if(!line.trim()){flushParagraph();i++;continue}
+    const fence=line.match(/^\s{0,3}(```+|~~~+)([\w+-]*)\s*$/);
+    if(fence){flushParagraph();const marker=fence[1][0],lang=fence[2]||'';i++;const code=[];while(i<lines.length&&!new RegExp(`^\\s{0,3}${marker}{3,}\\s*$`).test(lines[i]))code.push(lines[i++]);if(i<lines.length)i++;out.push(`<pre><code${lang?` class="language-${esc(lang)}"`:''}>${esc(code.join('\n'))}</code></pre>`);continue}
+    const heading=line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if(heading){flushParagraph();const level=heading[1].length;out.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`);i++;continue}
+    if(i+1<lines.length&&/^\s*(?:=+|-{3,})\s*$/.test(lines[i+1])){flushParagraph();const level=lines[i+1].trim().startsWith('=')?1:2;out.push(`<h${level}>${renderInlineMarkdown(line.trim())}</h${level}>`);i+=2;continue}
+    if(isMarkdownRule(line)){flushParagraph();out.push('<hr>');i++;continue}
+    if(/^\s{0,3}>/.test(line)){flushParagraph();const quote=[];while(i<lines.length&&/^\s{0,3}>/.test(lines[i]))quote.push(lines[i++].replace(/^\s{0,3}>\s?/,''));out.push(`<blockquote>${renderMarkdown(quote.join('\n'))}</blockquote>`);continue}
+    if(i+1<lines.length&&line.includes('|')&&/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(lines[i+1])){
+      flushParagraph();const headers=markdownCells(line),alignments=markdownCells(lines[i+1]).map(cell=>cell.startsWith(':')&&cell.endsWith(':')?'center':cell.startsWith(':')?'left':cell.endsWith(':')?'right':'');i+=2;const rows=[];
+      while(i<lines.length&&lines[i].includes('|')&&lines[i].trim())rows.push(markdownCells(lines[i++]));
+      const renderRow=(cells,tag)=>`<tr>${headers.map((_,col)=>`<${tag}${alignments[col]?` style="text-align:${alignments[col]}"`:''}>${renderInlineMarkdown(cells[col]||'')}</${tag}>`).join('')}</tr>`;
+      out.push(`<table><thead>${renderRow(headers,'th')}</thead><tbody>${rows.map(row=>renderRow(row,'td')).join('')}</tbody></table>`);continue;
+    }
+    const unordered=line.match(/^\s{0,3}([-+*])\s+(.+)$/),ordered=line.match(/^\s{0,3}(\d+)[.)]\s+(.+)$/);
+    if(unordered||ordered){
+      flushParagraph();const kind=unordered?'ul':'ol',items=[];
+      while(i<lines.length){const match=kind==='ul'?lines[i].match(/^\s{0,3}[-+*]\s+(.+)$/):lines[i].match(/^\s{0,3}\d+[.)]\s+(.+)$/);if(!match)break;items.push(`<li>${renderInlineMarkdown(match[1])}</li>`);i++}
+      out.push(`<${kind}>${items.join('')}</${kind}>`);continue;
+    }
+    paragraph.push(line);i++;
+    if(i<lines.length&&isMarkdownBlockStart(lines,i))flushParagraph();
+  }
+  flushParagraph();
+  return out.join('\n');
+}
 function splitCssSelectorList(text){const result=[];let start=0,depth=0,quote='',escaped=false;for(let i=0;i<text.length;i++){const c=text[i];if(escaped){escaped=false;continue}if(c==='\\'){escaped=true;continue}if(quote){if(c===quote)quote='';continue}if(c==='"'||c==="'"){quote=c;continue}if(c==='('||c==='[')depth++;else if(c===')'||c===']')depth=Math.max(0,depth-1);else if(c===','&&depth===0){result.push(text.slice(start,i));start=i+1}}result.push(text.slice(start));return result}
 function scopeStoryCss(css){
   const out=[];let i=0;const source=String(css||'').replace(/@import[^;]*;?/gi,'');
@@ -369,9 +441,41 @@ function safeHtml(source){
   return doc.body.innerHTML;
 }
 function bodyHTML(st){
-  const raw=String(st.body??'');
+  const raw=String(st.body??'').replace(/\r\n?/g,'\n');
+  if(!raw.trim())return '';
   const hasHtml=/<!doctype\s+html|<\s*\/?\s*[a-z][a-z0-9:-]*(?:\s+[^<>]*?)?\s*\/?\s*>/i.test(raw);
-  return hasHtml?safeHtml(raw):renderMarkdown(raw);
+  if(!hasHtml)return renderMarkdown(raw);
+
+  // First sanitize actual HTML and retain its safe, story-scoped styling. Then
+  // render Markdown markers found in text nodes as well, so mixed HTML/Markdown
+  // from SillyTavern does not disable Markdown for the whole story.
+  const sanitized=safeHtml(raw);
+  const parsed=new DOMParser().parseFromString(`<div id="violet-story-root">${sanitized}</div>`,'text/html');
+  const root=parsed.getElementById('violet-story-root');
+  if(!root)return renderMarkdown(raw);
+  const walker=parsed.createTreeWalker(root,NodeFilter.SHOW_TEXT);
+  const textNodes=[];
+  while(walker.nextNode())textNodes.push(walker.currentNode);
+  for(const node of textNodes){
+    const value=node.nodeValue||'';
+    if(!value.trim())continue;
+    const parent=node.parentElement;
+    if(!parent||parent.closest('script,style,pre,code,textarea,svg,math,noscript'))continue;
+    const tag=parent.tagName;
+    let html;
+    const blockContainer=['DIV','SECTION','ARTICLE','MAIN','BODY','BLOCKQUOTE'];
+    const hasBlockMarkdown=/^\s{0,3}(?:#{1,6}\s+|>|```|~~~|[-+*]\s+|\d+[.)]\s+|(?:\*\s*){3,}|(?:-\s*){3,}|(?:_\s*){3,})/m.test(value)||/\n\s*\n/.test(value);
+    const onlyTextChildren=[...parent.childNodes].every(child=>child.nodeType===Node.TEXT_NODE);
+    if(blockContainer.includes(tag)&&(hasBlockMarkdown||onlyTextChildren)){
+      html=renderMarkdown(value);
+    }else{
+      html=renderInlineMarkdown(value).replace(/\n/g,'<br>\n');
+    }
+    const template=parsed.createElement('template');
+    template.innerHTML=html;
+    node.parentNode.replaceChild(template.content,node);
+  }
+  return root.innerHTML;
 }
 function openReader(st){readerId=st.id;state.activeStoryId=st.id;$('#readerMeta').textContent=`${seriesName(st.seriesId)} · 第 ${storyNo(st)} 章`;$('#readerTitle').textContent=st.title;const readerBody=$('#readerBody');readerBody.innerHTML=bodyHTML(st);readerBody.scrollTop=0;$('#readProgress').textContent=`阅读进度 ${st.readProgress||0}%`;$('#readerDialog').showModal();readerBody.onscroll=()=>{const height=Math.max(readerBody.scrollHeight,1);const ratio=Math.min(100,Math.round((readerBody.scrollTop+readerBody.clientHeight)/height*100));const previous=Number(st.readProgress)||0;if(ratio>previous){st.readProgress=ratio;st.updatedAt=Date.now();$('#readProgress').textContent=`阅读进度 ${ratio}%`;clearTimeout(readerProgressTimer);readerProgressTimer=setTimeout(()=>{persist(null);readerProgressTimer=null},400)}};}
 $('#closeReader').onclick=$('#readerDone').onclick=()=>$('#readerDialog').close();$('#markRead').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st){st.readProgress=100;st.updatedAt=Date.now();persist('已标记读完');$('#readProgress').textContent='阅读进度 100%'}};$('#readerSource').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);$('#sourceText').textContent=st?.raw||'';$('#sourceDialog').showModal()};$('#closeSource').onclick=()=>$('#sourceDialog').close();$('#readerEdit').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openEdit(st)};$('#readerMusic').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openAssociation(st)};
