@@ -482,43 +482,23 @@ function ensureNarrowScreenReaderStyles(){
   const style=document.createElement('style');
   style.id='narrowScreenReaderStyle';
   style.textContent=`
-    /* Reader overflow guards: preserve existing typography, colors and desktop layout. */
-    #readerBody,.reader-body{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere;}
-    #readerBody img,#readerBody picture,#readerBody video,#readerBody canvas,#readerBody svg{max-width:100%!important;height:auto!important;box-sizing:border-box;}
-    #readerBody pre{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
-    @media(max-width:600px){
-      #readerBody{width:100%;min-width:0;max-width:100%;overflow-x:hidden;}
-      /* HTML story cards must remain a single vertical reading column on phones. */
+    /* 只修正阅读窗口：避免应用自己的 .story-card 手机两列规则误伤导入的 HTML 正文。 */
+    @media screen and (max-width: 600px){
+      #readerBody{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere;}
+      #readerBody > *{min-width:0;max-width:100%;}
       #readerBody .container{display:block!important;width:100%!important;min-width:0!important;max-width:480px!important;margin-left:auto!important;margin-right:auto!important;box-sizing:border-box!important;}
-      #readerBody .header-card,#readerBody .story-card{display:block!important;float:none!important;width:100%!important;min-width:0!important;max-width:100%!important;box-sizing:border-box!important;}
-      #readerBody .story-card>*{min-width:0;max-width:100%;box-sizing:border-box;}
-      #readerBody .narration,#readerBody .inner-thought,#readerBody .scene-desc,#readerBody .short-beat,#readerBody .dialogue,#readerBody .chapter-divider,#readerBody .sign-board,#readerBody .thought-emphasis{display:block;float:none;min-width:0;max-width:100%;box-sizing:border-box;}
+      #readerBody .story-card{display:block!important;float:none!important;width:100%!important;min-width:0!important;max-width:100%!important;grid-template-columns:none!important;grid-template-rows:none!important;grid-auto-flow:row!important;box-sizing:border-box!important;}
+      #readerBody .story-card > *{min-width:0;max-width:100%;box-sizing:border-box;}
+      #readerBody img,#readerBody picture,#readerBody video,#readerBody canvas,#readerBody svg{max-width:100%!important;height:auto!important;box-sizing:border-box;}
+      #readerBody table{display:block;width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
+      #readerBody pre{max-width:100%;overflow-x:auto;white-space:pre;-webkit-overflow-scrolling:touch;}
       #readerBody p,#readerBody li,#readerBody blockquote,#readerBody h1,#readerBody h2,#readerBody h3,#readerBody h4,#readerBody h5,#readerBody h6{max-width:100%;overflow-wrap:anywhere;word-break:normal;}
-      #readerBody div,#readerBody section,#readerBody article,#readerBody figure,#readerBody picture{max-width:100%;min-width:0;box-sizing:border-box;}
-      #readerBody table{max-width:100%;}
-      #readerBody .reader-table-scroll{display:block;width:100%;max-width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;margin:1em 0 1.3em;}
-      #readerBody .reader-table-scroll>table{width:max-content!important;min-width:100%;max-width:none!important;margin:0;}
-      #readerBody th,#readerBody td{overflow-wrap:anywhere;word-break:normal;}
-      #readerBody pre{width:100%;max-width:100%;overflow-x:auto;white-space:pre;}
-      #readerBody pre code{white-space:pre;overflow-wrap:normal;word-break:normal;}
-      #readerBody p code,#readerBody li code,#readerBody blockquote code{white-space:normal;overflow-wrap:anywhere;word-break:break-word;}
-      #readerBody blockquote{box-sizing:border-box;margin-left:0;margin-right:0;padding-left:.85em;padding-right:.85em;}
-      #readerBody img,#readerBody video,#readerBody iframe{max-width:100%!important;}
+      #readerBody blockquote{box-sizing:border-box;margin-left:0;margin-right:0;}
     }
   `;
   document.head.appendChild(style);
 }
-function prepareNarrowScreenReaderContent(container){
-  if(!container)return;
-  container.querySelectorAll('table').forEach(table=>{
-    if(table.parentElement?.classList.contains('reader-table-scroll'))return;
-    const wrapper=document.createElement('div');
-    wrapper.className='reader-table-scroll';
-    table.parentNode.insertBefore(wrapper,table);
-    wrapper.appendChild(table);
-  });
-}
-function openReader(st){ensureNarrowScreenReaderStyles();readerId=st.id;state.activeStoryId=st.id;$('#readerMeta').textContent=`${seriesName(st.seriesId)} · 第 ${storyNo(st)} 章`;$('#readerTitle').textContent=st.title;const readerBody=$('#readerBody');readerBody.innerHTML=bodyHTML(st);prepareNarrowScreenReaderContent(readerBody);readerBody.scrollTop=0;$('#readProgress').textContent=`阅读进度 ${st.readProgress||0}%`;$('#readerDialog').showModal();readerBody.onscroll=()=>{const height=Math.max(readerBody.scrollHeight,1);const ratio=Math.min(100,Math.round((readerBody.scrollTop+readerBody.clientHeight)/height*100));const previous=Number(st.readProgress)||0;if(ratio>previous){st.readProgress=ratio;st.updatedAt=Date.now();$('#readProgress').textContent=`阅读进度 ${ratio}%`;clearTimeout(readerProgressTimer);readerProgressTimer=setTimeout(()=>{persist(null);readerProgressTimer=null},400)}};}
+function openReader(st){ensureNarrowScreenReaderStyles();readerId=st.id;state.activeStoryId=st.id;$('#readerMeta').textContent=`${seriesName(st.seriesId)} · 第 ${storyNo(st)} 章`;$('#readerTitle').textContent=st.title;const readerBody=$('#readerBody');readerBody.innerHTML=bodyHTML(st);readerBody.scrollTop=0;$('#readProgress').textContent=`阅读进度 ${st.readProgress||0}%`;$('#readerDialog').showModal();readerBody.onscroll=()=>{const height=Math.max(readerBody.scrollHeight,1);const ratio=Math.min(100,Math.round((readerBody.scrollTop+readerBody.clientHeight)/height*100));const previous=Number(st.readProgress)||0;if(ratio>previous){st.readProgress=ratio;st.updatedAt=Date.now();$('#readProgress').textContent=`阅读进度 ${ratio}%`;clearTimeout(readerProgressTimer);readerProgressTimer=setTimeout(()=>{persist(null);readerProgressTimer=null},400)}};}
 $('#closeReader').onclick=$('#readerDone').onclick=()=>$('#readerDialog').close();$('#markRead').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st){st.readProgress=100;st.updatedAt=Date.now();persist('已标记读完');$('#readProgress').textContent='阅读进度 100%'}};$('#readerSource').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);$('#sourceText').textContent=st?.raw||'';$('#sourceDialog').showModal()};$('#closeSource').onclick=()=>$('#sourceDialog').close();$('#readerEdit').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openEdit(st)};$('#readerMusic').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openAssociation(st)};
 function openEdit(st){editingId=st.id;const f=$('#editForm');ensureStoryCoverFields(f);if(!f.querySelector('[name="summary"]')){const label=document.createElement('label');label.innerHTML='简介（可选）<textarea name="summary" rows="2"></textarea>';f.insertBefore(label,f.querySelector('[name="body"]')?.closest('label')||f.querySelector('.modal-actions')||null)}f.elements.title.value=st.title;f.elements.body.value=st.body;f.querySelector('[name="summary"]').value=st.summary||'';f.querySelector('[name="coverFile"]').value='';const existingCover=String(st.coverUrl||st.cover||'');f.querySelector('[name="coverUrl"]').value=/^https?:\/\//i.test(existingCover)?existingCover:'';f.elements.mode.value='text';f.elements.seriesId.innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}" ${s.id===st.seriesId?'selected':''}>${esc(s.name)}</option>`).join('');$('#editDialog').showModal()}
 $('#editForm').elements.body.addEventListener('input',()=>{if(editingId){try{localStorage.setItem(KEY+'-draft-'+editingId,$('#editForm').elements.body.value)}catch{}}});
