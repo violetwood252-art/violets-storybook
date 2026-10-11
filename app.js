@@ -482,14 +482,20 @@ function ensureNarrowScreenReaderStyles(){
   const style=document.createElement('style');
   style.id='narrowScreenReaderStyle';
   style.textContent=`
-    /* 阅读正文的基础防溢出保护，不干预主题的颜色与字体。 */
+    /* Reader overflow guards: preserve existing typography, colors and desktop layout. */
     #readerBody,.reader-body{box-sizing:border-box;min-width:0;max-width:100%;overflow-wrap:anywhere;}
-    #readerBody img,#readerBody picture,#readerBody video,#readerBody canvas,#readerBody svg,#readerBody iframe{max-width:100%!important;height:auto!important;box-sizing:border-box;}
+    #readerBody img,#readerBody picture,#readerBody video,#readerBody canvas,#readerBody svg{max-width:100%!important;height:auto!important;box-sizing:border-box;}
     #readerBody pre{max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch;}
     @media(max-width:600px){
       #readerBody{width:100%;min-width:0;max-width:100%;overflow-x:hidden;}
+      /* HTML story cards must remain a single vertical reading column on phones. */
+      #readerBody .container{display:block!important;width:100%!important;min-width:0!important;max-width:480px!important;margin-left:auto!important;margin-right:auto!important;box-sizing:border-box!important;}
+      #readerBody .header-card,#readerBody .story-card{display:block!important;float:none!important;width:100%!important;min-width:0!important;max-width:100%!important;box-sizing:border-box!important;}
+      #readerBody .story-card>*{min-width:0;max-width:100%;box-sizing:border-box;}
+      #readerBody .narration,#readerBody .inner-thought,#readerBody .scene-desc,#readerBody .short-beat,#readerBody .dialogue,#readerBody .chapter-divider,#readerBody .sign-board,#readerBody .thought-emphasis{display:block;float:none;min-width:0;max-width:100%;box-sizing:border-box;}
       #readerBody p,#readerBody li,#readerBody blockquote,#readerBody h1,#readerBody h2,#readerBody h3,#readerBody h4,#readerBody h5,#readerBody h6{max-width:100%;overflow-wrap:anywhere;word-break:normal;}
-      #readerBody div,#readerBody section,#readerBody article,#readerBody figure,#readerBody picture{max-width:100%;box-sizing:border-box;}
+      #readerBody div,#readerBody section,#readerBody article,#readerBody figure,#readerBody picture{max-width:100%;min-width:0;box-sizing:border-box;}
+      #readerBody table{max-width:100%;}
       #readerBody .reader-table-scroll{display:block;width:100%;max-width:100%;overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;margin:1em 0 1.3em;}
       #readerBody .reader-table-scroll>table{width:max-content!important;min-width:100%;max-width:none!important;margin:0;}
       #readerBody th,#readerBody td{overflow-wrap:anywhere;word-break:normal;}
@@ -497,6 +503,7 @@ function ensureNarrowScreenReaderStyles(){
       #readerBody pre code{white-space:pre;overflow-wrap:normal;word-break:normal;}
       #readerBody p code,#readerBody li code,#readerBody blockquote code{white-space:normal;overflow-wrap:anywhere;word-break:break-word;}
       #readerBody blockquote{box-sizing:border-box;margin-left:0;margin-right:0;padding-left:.85em;padding-right:.85em;}
+      #readerBody img,#readerBody video,#readerBody iframe{max-width:100%!important;}
     }
   `;
   document.head.appendChild(style);
