@@ -236,6 +236,9 @@ function ensureFloatingPlayerStyles(){
     #playerPanel .player-panel-selectors select{display:block;box-sizing:border-box;width:100%;max-width:100%;min-width:0;margin-top:4px;}
     #playerPanel .player-controls{display:flex;align-items:center;gap:8px;}
     #playerPanel .player-controls button{min-width:38px;min-height:36px;}
+    #playerPanel .player-repeat{display:block;width:100%;box-sizing:border-box;margin:9px 0;padding:8px 10px;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;cursor:pointer;}
+    #playerPanel .player-repeat.active{font-weight:700;border-width:2px;background:rgba(127,127,127,.12);}
+    #playerPanel .player-repeat:disabled{opacity:.5;cursor:not-allowed;}
     #playerPanel #playerSeek{display:block;width:100%;max-width:100%;}
     #playerPanel #exitReaderFromPlayer{display:block;width:100%;margin-top:8px;}
     @media(max-width:480px){
@@ -622,13 +625,22 @@ async function getTrackUrl(t){
   localTrackUrls.set(t.id,objectUrl);
   return objectUrl;
 }
-async function playTrack(id){
+async function playTrack(id,options={}){
   const t=state.tracks.find(track=>track.id===id);if(!t)return;
+  const autoAdvance=options.autoAdvance===true;
   let url='';
-  try{url=await getTrackUrl(t)}catch(error){console.error('读取音乐失败：',error);toast('读取本地音频失败，请关闭并重新打开应用后重试。');return}
-  if(!url){toast(t.kind==='file'?'这首音乐没有找到已保存的音频文件。它来自旧版本，请重新添加一次。':'请填写有效的音频直链。');return}
-  audio.pause();audio.src=url;audio.load();
-  audio.play().then(()=>{state.player={...(state.player||{}),trackId:id,isPlaying:true,position:0};persist('开始播放：'+t.title);showPlayer(t)}).catch(error=>{console.warn('音频播放未启动：',error);showPlayer(t);toast('浏览器可能要求再次点击播放，或该链接不可直接播放。')});
+  try{url=await getTrackUrl(t)}catch(error){console.error('读取音乐失败：',error);if(!autoAdvance)toast('读取本地音频失败，请关闭并重新打开应用后重试。');return}
+  if(!url){if(!autoAdvance)toast(t.kind==='file'?'这首音乐没有找到已保存的音频文件。它来自旧版本，请重新添加一次。':'请填写有效的音频直链。');return}
+  audio.pause();audio.loop=state.player?.repeatMode==='single';audio.src=url;audio.load();
+  audio.play().then(()=>{
+    state.player={...(state.player||{}),trackId:id,isPlaying:true,position:0};
+    persist(autoAdvance?null:'开始播放：'+t.title);
+    showPlayer(t,{preserveVisibility:autoAdvance});
+  }).catch(error=>{
+    console.warn('音频播放未启动：',error);
+    showPlayer(t,{preserveVisibility:autoAdvance});
+    if(!autoAdvance)toast('浏览器可能要求再次点击播放，或该链接不可直接播放。');
+  });
 }function activePlayerTrackList(){
   const playlistId=state.player?.playlistId||'';
   if(!playlistId)return (state.tracks||[]).slice();
@@ -746,9 +758,10 @@ function exitReaderFromPlayer(){
   const panel=$('#playerPanel');if(panel)panel.hidden=true;
   dialog.close('exit-from-player');
 }
-function showPlayer(t){
+function showPlayer(t,options={}){
   let p=$('#playerPanel');
-  if(!p){p=document.createElement('div');p.id='playerPanel';p.className='player-panel';document.body.append(p);}
+  if(!p){p=document.createElement('div');p.id='playerPanel';p.className='player-panel';p.hidden=true;document.body.append(p);}
+  const wasHidden=p.hidden;
   const dialog=$('#readerDialog'),readerOpen=!!dialog?.open&&!!readerId;
   if(readerOpen&&p.parentNode!==dialog)movePlayerNodeToReader(p);
   if(!readerOpen&&p.parentNode===dialog)restorePlayerNode(p);
@@ -757,8 +770,9 @@ function showPlayer(t){
   const playlistOptions=[`<option value="">全部音乐</option>`,...(state.playlists||[]).map(item=>`<option value="${esc(item.id)}" ${item.id===playlistId?'selected':''}>${esc(item.name)}</option>`)].join('');
   const trackOptions=list.length?list.map(track=>`<option value="${esc(track.id)}" ${track.id===current?.id?'selected':''}>${esc(track.title)}</option>`).join(''):'<option value="">这个歌单还没有歌曲</option>';
   const kindLabel=current?(current.kind==='url'?'网络音频':'本地音频'):'尚未选择曲目';
-  p.hidden=false;
-  p.innerHTML=`<div class="player-panel-head"><h3>${esc(current?.title||'音乐播放器')}</h3><button type="button" class="player-panel-close" data-player="close" aria-label="收起播放器">×</button></div><div class="muted">${esc(kindLabel)}${audio.paused?' · 已暂停':' · 正在播放'}</div><div class="player-panel-selectors"><label>切换歌单<select data-player="playlist">${playlistOptions}</select></label><label>选择曲目<select data-player="track" ${list.length?'':'disabled'}>${trackOptions}</select></label></div><div class="player-controls"><button type="button" data-player="prev" aria-label="上一首">|◀</button><button type="button" class="play" data-player="toggle" aria-label="播放或暂停" ${current?'':'disabled'}>${audio.paused?'▶':'Ⅱ'}</button><button type="button" data-player="next" aria-label="下一首">▶|</button></div><input type="range" id="playerSeek" min="0" max="100" value="0" aria-label="播放进度" ${audio.duration?'':'disabled'}><div class="audio-status">可以在这里切换歌单与曲目；收起面板不会停止播放。</div>${readerOpen?'<button type="button" class="text-button" id="exitReaderFromPlayer">退出正文，返回收藏馆</button>':''}<button type="button" class="text-button" id="closePlayer">收起播放器</button>`;
+  const singleLoop=state.player?.repeatMode==='single';
+  p.innerHTML=`<div class="player-panel-head"><h3>${esc(current?.title||'音乐播放器')}</h3><button type="button" class="player-panel-close" data-player="close" aria-label="收起播放器">×</button></div><div class="muted">${esc(kindLabel)}${audio.paused?' · 已暂停':' · 正在播放'}</div><div class="player-panel-selectors"><label>切换歌单<select data-player="playlist">${playlistOptions}</select></label><label>选择曲目<select data-player="track" ${list.length?'':'disabled'}>${trackOptions}</select></label></div><div class="player-controls"><button type="button" data-player="prev" aria-label="上一首">|◀</button><button type="button" class="play" data-player="toggle" aria-label="播放或暂停" ${current?'':'disabled'}>${audio.paused?'▶':'Ⅱ'}</button><button type="button" data-player="next" aria-label="下一首">▶|</button></div><button type="button" class="player-repeat ${singleLoop?'active':''}" data-player="repeat" aria-pressed="${singleLoop?'true':'false'}" ${current?'':'disabled'} title="开启后重复播放当前歌曲">${singleLoop?'🔂 单曲循环：开启':'🔁 单曲循环：关闭'}</button><input type="range" id="playerSeek" min="0" max="100" value="0" aria-label="播放进度" ${audio.duration?'':'disabled'}><div class="audio-status">${singleLoop?'单曲循环已开启；当前歌曲会重复播放。':'单曲循环已关闭；列表结束后的行为遵循全局循环设置。'} 收起面板不会停止播放。</div>${readerOpen?'<button type="button" class="text-button" id="exitReaderFromPlayer">退出正文，返回收藏馆</button>':''}<button type="button" class="text-button" id="closePlayer">收起播放器</button>`;
+  p.hidden=options.preserveVisibility===true?wasHidden:false;
   p.querySelector('[data-player="close"]').onclick=()=>p.hidden=true;
   p.querySelector('[data-player="toggle"]').onclick=()=>{
     if(!current){toast('请先在音乐馆添加音乐');return}
@@ -775,13 +789,31 @@ function showPlayer(t){
     else{audio.pause();state.player={...(state.player||{}),trackId:'',isPlaying:false};persist(null);showPlayer(null);toast('这个歌单还没有歌曲，可以先去音乐馆添加曲目。')}
   };
   p.querySelector('[data-player="track"]').onchange=event=>{const id=event.target.value;if(id)playTrack(id)};
+  p.querySelector('[data-player="repeat"]').onclick=()=>{
+    const repeatMode=state.player?.repeatMode==='single'?'list':'single';
+    state.player={...(state.player||{}),repeatMode};
+    audio.loop=repeatMode==='single';
+    persist(null);
+    showPlayer(current,{preserveVisibility:true});
+  };
   p.querySelector('#closePlayer').onclick=()=>{p.hidden=true};
   const exitButton=p.querySelector('#exitReaderFromPlayer');if(exitButton)exitButton.onclick=exitReaderFromPlayer;
   p.querySelector('#playerSeek').oninput=event=>{if(audio.duration)audio.currentTime=audio.duration*Number(event.target.value)/100};
   audio.ontimeupdate=()=>{const seek=$('#playerSeek');if(seek&&audio.duration)seek.value=audio.currentTime/audio.duration*100};
   audio.onplay=()=>{state.player={...(state.player||{}),isPlaying:true};const toggle=p.querySelector('[data-player="toggle"]');if(toggle)toggle.textContent='Ⅱ';const status=p.querySelector('.muted');if(status)status.textContent=`${current?.kind==='url'?'网络音频':'本地音频'} · 正在播放`};
   audio.onpause=()=>{state.player={...(state.player||{}),isPlaying:false};const toggle=p.querySelector('[data-player="toggle"]');if(toggle)toggle.textContent='▶';const status=p.querySelector('.muted');if(status&&current)status.textContent=`${current.kind==='url'?'网络音频':'本地音频'} · 已暂停`};
-  audio.onended=()=>{const tracks=activePlayerTrackList(),index=tracks.findIndex(track=>track.id===state.player?.trackId),next=index>=0?tracks[index+1]:tracks[0];if(next)playTrack(next.id);else if(state.settings.loop&&tracks.length)playTrack(tracks[0].id);else{state.player={...(state.player||{}),isPlaying:false};persist(null);showPlayer(state.tracks.find(track=>track.id===state.player?.trackId)||null)}};
+  audio.loop=state.player?.repeatMode==='single';
+  audio.onended=()=>{
+    if(state.player?.repeatMode==='single'){
+      audio.currentTime=0;
+      audio.play().then(()=>{state.player={...(state.player||{}),isPlaying:true};persist(null)}).catch(error=>console.warn('单曲循环未能继续播放：',error));
+      return;
+    }
+    const tracks=activePlayerTrackList(),index=tracks.findIndex(track=>track.id===state.player?.trackId),next=index>=0?tracks[index+1]:tracks[0];
+    if(next)playTrack(next.id,{autoAdvance:true});
+    else if(state.settings.loop&&tracks.length)playTrack(tracks[0].id,{autoAdvance:true});
+    else{state.player={...(state.player||{}),isPlaying:false};persist(null);showPlayer(state.tracks.find(track=>track.id===state.player?.trackId)||null,{preserveVisibility:true})}
+  };
   applyPlayerFabDock();positionPlayerPanel();
 }
 function stepTrack(dir){
