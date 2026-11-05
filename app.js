@@ -972,6 +972,15 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       #pageContent .violet-music-grid .list-row[data-track] .list-main strong,
       #pageContent .violet-music-grid .list-row[data-track] .list-main small{white-space:normal!important;word-break:normal!important;overflow-wrap:break-word!important}
       #pageContent .violet-music-grid .list-row[data-track] > button{flex:0 0 auto!important;white-space:nowrap!important;min-width:0}
+      /* Role/series cards only on tablet/desktop; leave phone layout untouched. */
+      @media(min-width:761px){
+      #pageContent .violet-character-grid,#pageContent .violet-series-grid{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr))!important;gap:16px;min-width:0}
+      #pageContent .violet-character-grid > .panel,#pageContent .violet-series-grid > .panel{min-width:0;max-width:100%}
+      #pageContent .violet-character-grid > .panel > .list-row,#pageContent .violet-series-grid > .panel > .list-row{display:flex;align-items:center;flex-wrap:wrap;gap:9px 10px;min-width:0}
+      #pageContent .violet-character-grid > .panel > .list-row > .list-main,#pageContent .violet-series-grid > .panel > .list-row > .list-main{flex:1 1 190px!important;min-width:min(100%,190px)!important;max-width:100%;white-space:normal!important}
+      #pageContent .violet-character-grid > .panel > .list-row .list-main strong,#pageContent .violet-character-grid > .panel > .list-row .list-main small,#pageContent .violet-series-grid > .panel > .list-row .list-main small,#pageContent .violet-series-grid .violet-series-title{white-space:normal!important;word-break:normal!important;overflow-wrap:break-word!important}
+      #pageContent .violet-character-grid > .panel > .list-row button,#pageContent .violet-series-grid > .panel > .list-row button{flex:0 0 auto;white-space:nowrap}
+      }
       /* Only close whitespace at rich-regex boundaries. Never change global paragraph spacing. */
       #readerBody .violet-rich-before{margin-bottom:0!important}
       #readerBody .violet-rich-widget{margin-top:8px!important;margin-bottom:12px!important}
@@ -1741,8 +1750,8 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   render=function violetRenderWithAdditions1105(){
     originalRender1105();
     installStyles1105();ensureRules1105();
-    if(currentPage==='characters')enhanceCharacters1105();
-    if(currentPage==='series')enhanceSeries1105();
+    if(currentPage==='characters'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-character-grid');enhanceCharacters1105();}
+    if(currentPage==='series'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-series-grid');enhanceSeries1105();}
     if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105()}
     if(currentPage==='music'){const musicGrid=$('#pageContent .module-grid');if(musicGrid)musicGrid.classList.add('violet-music-grid');installListAccordion1105('music')}
   };
