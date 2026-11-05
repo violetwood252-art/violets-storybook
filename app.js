@@ -1586,23 +1586,36 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       // bottom:-20px caption; the iframe must fit those painted descendants.
       const baseBottom=Math.max(box.height,box.bottom);
       let paintedBottom=baseBottom;
+      let hasBottomOverflow=false;
       body.querySelectorAll('*').forEach(node=>{
-        // Browsers may report bounding boxes for descendants of a closed
-        // <details> even though only its <summary> is actually painted.
+        // Closed <details> descendants are not painted and must not enlarge
+        // the frame or break its existing expand/collapse behavior.
         const closed=node.closest('details:not([open])');
         if(closed){
           const summary=closed.querySelector(':scope > summary');
           if(!summary||(node!==summary&&!summary.contains(node)))return;
         }
+        const style=getComputedStyle(node);
+        if(style.display==='none'||style.visibility==='hidden'||style.position==='fixed')return;
         const rect=node.getBoundingClientRect();
-        if(!rect.width||!rect.height||!Number.isFinite(rect.bottom)||rect.bottom<=paintedBottom)return;
-        if(getComputedStyle(node).position==='fixed')return;
+        if(!rect.width||!rect.height||!Number.isFinite(rect.bottom))return;
         paintedBottom=Math.max(paintedBottom,rect.bottom);
+        // An animated caption such as bottom:-20px may be at scale(.5)
+        // when first measured; its actual visible extent increases later.
+        // Reserve its declared outward position independently of animation.
+        const bottom=style.position==='absolute'?parseFloat(style.bottom):NaN;
+        if(Number.isFinite(bottom)&&bottom<0&&node.offsetParent){
+          const boundary=node.offsetParent.getBoundingClientRect().bottom;
+          if(Number.isFinite(boundary)){
+            hasBottomOverflow=true;
+            paintedBottom=Math.max(paintedBottom,boundary-bottom);
+          }
+        }
       });
-      // Keep ordinary templates' existing spacing. Allow a little extra
-      // only when an element protrudes below its parent's layout bounds.
-      const proposed=Math.ceil(paintedBottom>baseBottom+1
-        ? paintedBottom+margins+8 : baseBottom+margins+3);
+      // Only widgets with genuine overhanging decoration receive a small
+      // reserve for animated scaling / late font swaps; normal spacing stays.
+      const extra=hasBottomOverflow?18:(paintedBottom>baseBottom+1?8:3);
+      const proposed=Math.ceil(paintedBottom+margins+extra);
       if(Math.abs(proposed-height)>2){height=proposed;post('resize',{height:proposed})}
     }
     window.addEventListener('DOMContentLoaded',()=>{
@@ -1610,6 +1623,12 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       if(window.ResizeObserver){new ResizeObserver(measure).observe(document.body)}
       if(window.MutationObserver){new MutationObserver(()=>requestAnimationFrame(measure)).observe(document.body,{childList:true,subtree:true})}
       window.addEventListener('load',measure);setTimeout(measure,150);setTimeout(measure,700);
+      // Font swaps and CSS animations can change painted bounds without a
+      // body resize or DOM mutation, especially on mobile browsers.
+      document.fonts?.ready?.then(measure).catch(()=>{});
+      document.fonts?.addEventListener?.('loadingdone',measure);
+      window.addEventListener('resize',measure);
+      document.addEventListener('animationiteration',()=>requestAnimationFrame(measure),true);
     });
   })();`;
   function buildRichWidget1105(doc,widget,preview=false){
