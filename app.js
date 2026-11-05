@@ -1581,7 +1581,9 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       const margins=(parseFloat(css.marginTop)||0)+(parseFloat(css.marginBottom)||0);
       // Measure the content itself: documentElement.scrollHeight is at least
       // the previous iframe viewport height and would prevent shrinking.
-      const proposed=Math.ceil(box.height+margins+3);
+      // Top margins on a template's first block can collapse outside body.
+      // Include body's actual bottom position, not just its box height.
+      const proposed=Math.ceil(Math.max(box.height,box.bottom)+margins+3);
       if(Math.abs(proposed-height)>2){height=proposed;post('resize',{height:proposed})}
     }
     window.addEventListener('DOMContentLoaded',()=>{
