@@ -962,6 +962,19 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       #pageContent .violet-section-fold{width:100%;display:flex;align-items:center;justify-content:space-between;text-align:left;gap:10px;font:inherit;font-weight:700;cursor:pointer;min-height:40px}
       #pageContent .violet-section-fold .violet-chevron{flex-shrink:0;font-size:1.05em}
       #pageContent .violet-folded-list[hidden]{display:none!important}
+      /* Music layout: fit columns to the actual available width instead of the device width.
+         Preserve the original 1105 theme, controls, drag-sort and accordion. */
+      #pageContent .violet-music-grid{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr))!important;gap:16px;min-width:0}
+      #pageContent .violet-music-grid > .panel{min-width:0;max-width:100%}
+      #pageContent .violet-music-grid .list-row[data-track]{display:flex;flex-wrap:wrap!important;align-items:center;gap:9px 10px;min-width:0}
+      #pageContent .violet-music-grid .list-row[data-track] .list-icon{flex:0 0 auto}
+      #pageContent .violet-music-grid .list-row[data-track] .list-main{flex:1 1 210px!important;min-width:min(100%,210px)!important;max-width:100%;white-space:normal}
+      #pageContent .violet-music-grid .list-row[data-track] .list-main strong,
+      #pageContent .violet-music-grid .list-row[data-track] .list-main small{white-space:normal!important;word-break:normal!important;overflow-wrap:break-word!important}
+      #pageContent .violet-music-grid .list-row[data-track] > button{flex:0 0 auto!important;white-space:nowrap!important;min-width:0}
+      /* Only close whitespace at rich-regex boundaries. Never change global paragraph spacing. */
+      #readerBody .violet-rich-before{margin-bottom:0!important}
+      #readerBody .violet-rich-widget{margin-top:8px!important;margin-bottom:12px!important}
       #pageContent .violet-series-avatar-action{flex-shrink:0}
       .violet-rich-widget{overflow:visible;max-width:100%}
       @media(max-width:600px){.violet-rich-widget{width:100%;min-width:0}}
@@ -1377,6 +1390,34 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     }
     return {source,widgets};
   }
+  function compactRichBoundary1105(host){
+    // Rich-regex placeholders are padded with newlines for Markdown splitting.
+    // In mixed HTML/Markdown those generated separators can become empty blocks/BRs.
+    // Remove only empty nodes directly touching the widget; never touch prose or raw story data.
+    const emptyParagraph=node=>node?.nodeType===Node.ELEMENT_NODE&&node.tagName==='P'&&
+      !node.textContent.trim()&&!node.querySelector('img,video,audio,svg,canvas,iframe,object,embed');
+    const blank=node=>node?.nodeType===Node.TEXT_NODE&&!node.textContent.trim();
+    for(const direction of ['previousSibling','nextSibling']){
+      let count=0,node=host[direction];
+      while(node&&count<16){
+        const removable=blank(node)||(node.nodeType===Node.ELEMENT_NODE&&node.tagName==='BR')||emptyParagraph(node);
+        if(!removable)break;
+        const next=node[direction];node.remove();node=next;count++;
+      }
+    }
+    const before=host.previousElementSibling;
+    if(before&&/^(P|DIV|BLOCKQUOTE)$/.test(before.tagName)){
+      before.classList.add('violet-rich-before');
+      if(before.tagName==='P'){
+        let count=0;
+        while(before.lastChild&&count<12){
+          const tail=before.lastChild;
+          if(blank(tail)||(tail.nodeType===Node.ELEMENT_NODE&&tail.tagName==='BR')){tail.remove();count++}
+          else break;
+        }
+      }
+    }
+  }
   function replaceRichMarkers1105(container,widgets,preview=false){
     if(!widgets.length)return;
     const doc=container.ownerDocument;
@@ -1405,6 +1446,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       if(parent&&parent.tagName==='P'&&parent.textContent.trim()===text.trim()&&/^\s*VIOLETRICHWIDGET\d+END\s*$/.test(text))parent.replaceWith(fragment);
       else textNode.replaceWith(fragment);
     }
+    container.querySelectorAll('.violet-rich-widget').forEach(compactRichBoundary1105);
   }
   function buildRichWidget1105(doc,widget,preview=false){
     const host=doc.createElement('div');host.className='violet-rich-widget';host.dataset.violetRegexSkip='1';
@@ -1702,7 +1744,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(currentPage==='characters')enhanceCharacters1105();
     if(currentPage==='series')enhanceSeries1105();
     if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105()}
-    if(currentPage==='music')installListAccordion1105('music');
+    if(currentPage==='music'){const musicGrid=$('#pageContent .module-grid');if(musicGrid)musicGrid.classList.add('violet-music-grid');installListAccordion1105('music')}
   };
   openReader=function violetOpenReaderWithRegex1105(st){
     originalOpenReader1105(st);
