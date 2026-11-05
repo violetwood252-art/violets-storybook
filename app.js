@@ -925,3 +925,422 @@ document.addEventListener('click',function(event){
   dialog.close(closeButton.id==='readerDone'?'return':'cancel');
 },true);
 bindActionButtons();getActiveTheme();installModalControlProtection();installReaderPlayerFeatures();render();applyActiveTheme();void initializePersistentAudio();
+
+/* ============================================================================
+ * Violet's Storybook 1105 — additive enhancements, 2026-11-05
+ * The original 1105 lines above are preserved verbatim. No original renderer,
+ * CSS theme, player, story source or persistence key has been replaced.
+ * Features: character deletion, avatars, display-only regex, series accordion.
+ * ========================================================================== */
+(function violet1105Enhancements(){
+  'use strict';
+
+  const originalRender1105=render;
+  const originalOpenReader1105=openReader;
+  const originalAction1105=action;
+  const expandedSeries1105=new Set();
+
+  function ensureRules1105(){
+    if(!Array.isArray(state.regexRules))state.regexRules=[];
+    return state.regexRules;
+  }
+
+  function installStyles1105(){
+    if(document.getElementById('violet1105EnhancementStyles'))return;
+    const el=document.createElement('style');
+    el.id='violet1105EnhancementStyles';
+    el.textContent=`
+      #pageContent .violet-series-contents[hidden],#violetRuleStoryOptions[hidden]{display:none!important}
+      #pageContent .violet-series-title{appearance:none;background:transparent;border:0;box-shadow:none;padding:2px 0;text-align:left;color:inherit;font:inherit;font-weight:700;cursor:pointer;max-width:100%;overflow-wrap:anywhere}
+      #pageContent .violet-series-toggle{flex-shrink:0;min-width:35px;min-height:35px;padding:3px 8px;cursor:pointer}
+      #pageContent .violet-avatar-image{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
+      #pageContent .violet-avatar-action{font:inherit;cursor:pointer;max-width:100%}
+      #pageContent .violet-role-actions{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
+      #pageContent .violet-regex-panel{margin-top:18px;min-width:0}
+      #pageContent .violet-regex-rule{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px dashed currentColor}
+      #pageContent .violet-regex-rule-info{flex:1;min-width:160px;overflow-wrap:anywhere}
+      #pageContent .violet-regex-actions{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+      #pageContent .violet-regex-actions button{min-height:34px}
+      #pageContent .violet-regex-toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+      dialog.violet-extra-dialog{width:min(680px,calc(100vw - 22px));max-width:calc(100vw - 22px);max-height:90vh;overflow:auto;box-sizing:border-box}
+      dialog.violet-extra-dialog label{display:block;margin:10px 0}
+      dialog.violet-extra-dialog input:not([type=checkbox]):not([type=radio]),dialog.violet-extra-dialog textarea,dialog.violet-extra-dialog select{display:block;box-sizing:border-box;width:100%;max-width:100%;margin-top:5px}
+      dialog.violet-extra-dialog .violet-extra-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:15px}
+      dialog.violet-extra-dialog .violet-story-options{max-height:165px;overflow:auto;padding:8px;border:1px solid currentColor;border-radius:7px}
+      dialog.violet-extra-dialog .violet-story-options label{display:flex;align-items:center;gap:8px;margin:6px 0}
+      dialog.violet-extra-dialog .violet-story-options input{flex-shrink:0}
+      dialog.violet-extra-dialog .violet-preview-area{max-height:52vh;overflow:auto;border:1px solid currentColor;border-radius:8px;padding:12px;box-sizing:border-box;overflow-wrap:anywhere}
+      dialog.violet-extra-dialog .violet-avatar-preview{width:76px;height:76px;object-fit:cover;border:1px solid currentColor;border-radius:8px;vertical-align:middle}
+      @media(max-width:480px){#pageContent .violet-role-actions{gap:5px}dialog.violet-extra-dialog{padding:12px}}
+    `;
+    document.head.appendChild(el);
+  }
+
+  function findCharacter1105(id){return (state.characters||[]).find(c=>c.id===id)}
+  function getAvatar1105(character){
+    const storyId=character?.avatarStoryId;
+    if(storyId){
+      const story=(state.stories||[]).find(s=>s.id===storyId);
+      return story?safeImageSource(story.coverUrl||story.cover||''):'';
+    }
+    return safeImageSource(character?.avatar||'');
+  }
+  function enhanceCharacters1105(){
+    document.querySelectorAll('#pageContent [data-action="edit-character"]').forEach(button=>{
+      const character=findCharacter1105(button.dataset.id);
+      const row=button.closest('.list-row');
+      if(!character||!row)return;
+      const icon=row.querySelector('.list-icon');
+      const avatar=getAvatar1105(character);
+      if(icon&&avatar){
+        icon.textContent='';
+        const img=document.createElement('img');
+        img.className='violet-avatar-image';img.alt=character.name+'的头像';img.src=avatar;
+        img.onerror=()=>{icon.textContent='♙'};
+        icon.appendChild(img);
+      }
+      const actions=document.createElement('span');actions.className='violet-role-actions';
+      const avatarButton=document.createElement('button');avatarButton.type='button';avatarButton.className='violet-avatar-action';avatarButton.dataset.action='violet-avatar';avatarButton.dataset.id=character.id;avatarButton.textContent='头像';
+      const del=document.createElement('button');del.type='button';del.dataset.action='violet-delete-character';del.dataset.id=character.id;del.textContent='删除';
+      button.parentNode.insertBefore(actions,button);actions.append(button,avatarButton,del);
+    });
+    bindActionButtons($('#pageContent'));
+  }
+
+  function deleteCharacter1105(id){
+    const character=findCharacter1105(id);if(!character)return;
+    const affected=(state.stories||[]).filter(st=>Array.isArray(st.characterIds)&&st.characterIds.includes(id)).length;
+    const message=`确定删除角色「${character.name}」吗？\n\n该角色关联的 ${affected} 篇番外仍会完整保留，只移除此角色的关联。\n此操作不可撤销。`;
+    if(!confirm(message))return;
+    const previousCharacters=state.characters;
+    const previousAssociations=(state.stories||[]).map(st=>({st,ids:st.characterIds}));
+    state.characters=state.characters.filter(c=>c.id!==id);
+    for(const {st} of previousAssociations){
+      if(Array.isArray(st.characterIds)&&st.characterIds.includes(id)){
+        st.characterIds=st.characterIds.filter(cid=>cid!==id);
+      }
+    }
+    if(!persist(null)){
+      state.characters=previousCharacters;
+      for(const {st,ids} of previousAssociations)st.characterIds=ids;
+      return;
+    }
+    toast('角色已删除；所有番外及正文均已保留。');render();
+  }
+
+  function showDialog1105(id,html){
+    document.getElementById(id)?.remove();
+    const dlg=document.createElement('dialog');dlg.id=id;dlg.className='modal violet-extra-dialog';
+    dlg.innerHTML=html;document.body.appendChild(dlg);
+    dlg.addEventListener('close',()=>dlg.remove(),{once:true});
+    dlg.querySelectorAll('[data-violet-cancel]').forEach(b=>b.addEventListener('click',()=>dlg.close()));
+    dlg.showModal();return dlg;
+  }
+
+  function openAvatar1105(id){
+    const character=findCharacter1105(id);if(!character)return;
+    const available=(state.stories||[]).filter(st=>safeImageSource(st.coverUrl||st.cover||''));
+    const options=available.map(st=>`<option value="${esc(st.id)}" ${character.avatarStoryId===st.id?'selected':''}>${esc(st.title)}</option>`).join('');
+    const avatar=getAvatar1105(character);
+    const mode=character.avatarStoryId?'story':character.avatar?'upload':'none';
+    const dlg=showDialog1105('violetAvatarDialog',`
+      <h3>设置角色头像 · ${esc(character.name)}</h3>
+      <p class="muted">可上传一张图片，或直接关联某篇番外的封面。选用番外封面后，封面更新会同步反映到头像。</p>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap"><span id="violetAvatarPreview">${avatar?`<img class="violet-avatar-preview" src="${esc(avatar)}" alt="预览">`:'默认人物图标 ♙'}</span></div>
+      <form id="violetAvatarForm">
+        <label><input type="radio" name="avatarMode" value="none" ${mode==='none'?'checked':''}> 使用原版默认人物图标</label>
+        <label><input type="radio" name="avatarMode" value="upload" ${mode==='upload'?'checked':''}> 上传本地头像</label>
+        <input type="file" name="avatarFile" accept="image/png,image/jpeg,image/webp,image/gif,image/avif">
+        <label><input type="radio" name="avatarMode" value="story" ${mode==='story'?'checked':''}> 使用已有番外封面</label>
+        <select name="avatarStory"><option value="">请选择有封面的番外…</option>${options}</select>
+        ${!available.length?'<p class="muted">目前没有带封面的番外可选。</p>':''}
+        <div class="violet-extra-actions"><button type="button" data-violet-cancel>取消</button><button class="button primary" type="submit">保存头像</button></div>
+      </form>`);
+    const form=dlg.querySelector('form');
+    form.elements.avatarFile.addEventListener('change',()=>{if(form.elements.avatarFile.files.length)form.querySelector('[value="upload"]').checked=true});
+    form.elements.avatarStory.addEventListener('change',()=>{if(form.elements.avatarStory.value)form.querySelector('[value="story"]').checked=true});
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();
+      const picked=form.querySelector('[name="avatarMode"]:checked')?.value;
+      const oldAvatar=character.avatar,oldStoryId=character.avatarStoryId;
+      let nextAvatar='',nextStoryId='';
+      if(picked==='story'){
+        nextStoryId=form.elements.avatarStory.value;
+        if(!available.some(st=>st.id===nextStoryId)){toast('请选择一个有封面的番外');return}
+      }else if(picked==='upload'){
+        const file=form.elements.avatarFile.files[0];
+        if(file){
+          if(!/^image\/(?:png|jpeg|webp|gif|avif)$/.test(file.type)||file.size>15*1024*1024){toast('请使用小于 15MB 的 PNG、JPG、WebP、GIF 或 AVIF 图片。');return}
+          try{nextAvatar=await imageFileToDataURL(file,480,.82)}catch(error){toast(error?.message||'头像图片处理失败');return}
+        }else if(character.avatar&&!character.avatarStoryId){nextAvatar=character.avatar}
+        else{toast('请先选择一张本地头像图片');return}
+      }
+      character.avatar=nextAvatar;character.avatarStoryId=nextStoryId;
+      if(!persist(null)){
+        character.avatar=oldAvatar;character.avatarStoryId=oldStoryId;
+        return;
+      }
+      dlg.close();toast('角色头像已保存');render();
+    });
+  }
+
+  function enhanceSeries1105(){
+    document.querySelectorAll('#pageContent [data-action="edit-series"]').forEach(button=>{
+      const row=button.closest('.list-row');const panel=row?.parentElement;
+      if(!row||!panel)return;
+      const id=button.dataset.id;
+      const info=row.querySelector('.list-main');const title=info?.querySelector('strong');
+      if(!title)return;
+      const toggle=document.createElement('button');toggle.type='button';toggle.className='violet-series-title';
+      toggle.dataset.action='violet-toggle-series';toggle.dataset.id=id;toggle.textContent=title.textContent;
+      title.replaceWith(toggle);
+      const arrow=document.createElement('button');arrow.type='button';arrow.className='violet-series-toggle';arrow.dataset.action='violet-toggle-series';arrow.dataset.id=id;
+      arrow.setAttribute('aria-label','展开或折叠系列');row.insertBefore(arrow,button);
+      const contents=document.createElement('div');contents.className='violet-series-contents';contents.id='violet-series-'+id.replace(/[^a-zA-Z0-9_-]/g,'_');
+      while(row.nextSibling)contents.appendChild(row.nextSibling);
+      panel.appendChild(contents);
+      const expanded=expandedSeries1105.has(id);
+      contents.hidden=!expanded;toggle.setAttribute('aria-expanded',String(expanded));arrow.setAttribute('aria-expanded',String(expanded));
+      toggle.setAttribute('aria-controls',contents.id);arrow.setAttribute('aria-controls',contents.id);
+      arrow.textContent=expanded?'▾':'▸';
+    });
+    bindActionButtons($('#pageContent'));
+  }
+  function toggleSeries1105(id){
+    if(expandedSeries1105.has(id))expandedSeries1105.delete(id);else expandedSeries1105.add(id);
+    const panel=[...document.querySelectorAll('#pageContent [data-action="edit-series"]')].find(b=>b.dataset.id===id)?.closest('.panel');
+    if(!panel)return;
+    const expanded=expandedSeries1105.has(id);
+    const contents=panel.querySelector('.violet-series-contents');if(contents)contents.hidden=!expanded;
+    panel.querySelectorAll('[data-action="violet-toggle-series"]').forEach(b=>{
+      b.setAttribute('aria-expanded',String(expanded));
+      if(b.classList.contains('violet-series-toggle'))b.textContent=expanded?'▾':'▸';
+    });
+  }
+
+  // Regex patterns are applied only to rendered text nodes; this never writes to
+  // story.body, story.raw, the Markdown parser, HTML sanitizer or CSS engine.
+  function compileRegex1105(input,optionalFlags=''){
+    const value=String(input||'').trim();
+    if(!value||value.length>600)throw new Error('正则表达式不能为空，且不能超过 600 个字符。');
+    let source=value,flags=String(optionalFlags||'').trim();
+    const delimited=value.match(/^\/([\s\S]*)\/([dgimsuvy]*)$/);
+    if(delimited){source=delimited[1];flags=delimited[2]}
+    if(!/^[dgimsuvy]*$/.test(flags))throw new Error('正则 flags 只能使用 d、g、i、m、s、u、v、y。');
+    if(!flags.includes('g')&&!flags.includes('y'))flags+='g';
+    let re;
+    try{re=new RegExp(source,flags)}catch(e){throw new Error('正则表达式无效：'+e.message)}
+    // Prevent zero-length replacements from producing unlimited decorative HTML.
+    re.lastIndex=0;
+    if(re.exec('')?.[0]==='')throw new Error('不能使用可匹配空字符串的正则表达式。');
+    re.lastIndex=0;
+    if(re.exec('a')?.[0]==='')throw new Error('不能使用可匹配零长度的正则表达式。');
+    // Reject the common nested-quantifier patterns responsible for catastrophic backtracking.
+    if(/\((?:[^()]|\\.){0,150}[+*](?:[^()]|\\.){0,150}\)\s*(?:[+*]|\{\d+,?\d*\})/.test(source))throw new Error('检测到高风险嵌套量词，请简化正则表达式。');
+    return re;
+  }
+  function normalizeRule1105(raw,index=0){
+    if(!raw||typeof raw!=='object'||Array.isArray(raw))throw new Error('第 '+(index+1)+' 条正则不是有效对象。');
+    let input=raw.findRegex??raw.pattern??raw.regex??raw.find;
+    if(input instanceof RegExp)input=input.toString();
+    if(typeof input!=='string')throw new Error('第 '+(index+1)+' 条正则缺少 findRegex/pattern。');
+    const replacement=raw.replaceString??raw.replacement??raw.replace??'';
+    if(typeof replacement!=='string'||replacement.length>50000)throw new Error('第 '+(index+1)+' 条替换模板格式错误或过长。');
+    compileRegex1105(input,raw.flags||'');
+    const scope=raw.scope==='selected'?'selected':raw.scope==='all'?'all':Array.isArray(raw.storyIds)?'selected':'all';
+    const storyIds=Array.isArray(raw.storyIds)?raw.storyIds.filter(id=>typeof id==='string'):[];
+    return {
+      id:uid('rx'),name:String(raw.scriptName??raw.regexName??raw.name??`美化正则 ${index+1}`).trim().slice(0,120)||`美化正则 ${index+1}`,
+      findRegex:input,flags:typeof raw.flags==='string'?raw.flags:'',replaceString:replacement,
+      enabled:raw.enabled!==false&&raw.disabled!==true,
+      scope,storyIds:scope==='selected'?storyIds:[]
+    };
+  }
+  function extractRules1105(data){
+    if(Array.isArray(data))return data;
+    if(!data||typeof data!=='object')throw new Error('正则文件内容必须是 JSON 对象或数组。');
+    for(const k of ['regexRules','regexScripts','scripts','rules'])if(Array.isArray(data[k]))return data[k];
+    return [data];
+  }
+  function saveRules1105(next,success){
+    const previous=ensureRules1105();
+    state.regexRules=next;
+    if(!persist(null)){state.regexRules=previous;return false}
+    toast(success);render();return true;
+  }
+  function ruleApplies1105(rule,storyId){
+    return rule.enabled!==false && (rule.scope!=='selected'||(Array.isArray(rule.storyIds)&&rule.storyIds.includes(storyId)));
+  }
+  function templateReplacement1105(template,match,captures,groups){
+    return String(template).replace(/\$\$|\$&|\$0|\$(\d{1,2})|\$<([^>]+)>|\{\{\s*(match|\d+)\s*\}\}/gi,(token,n,g,curly)=>{
+      if(token==='$$')return '$';
+      if(token==='$&'||token==='$0'||String(curly).toLowerCase()==='match')return esc(match);
+      const pos=n!==undefined?Number(n):/^\d+$/.test(curly||'')?Number(curly):null;
+      if(pos!==null)return esc(pos===0?match:captures[pos-1]??'');
+      if(g!==undefined)return esc(groups?.[g]??'');
+      return token;
+    });
+  }
+  function applySingleRule1105(container,rule){
+    let matcher;
+    try{matcher=compileRegex1105(rule.findRegex,rule.flags)}catch(error){console.warn('跳过格式错误的正则：',rule.name,error);return 0}
+    const doc=container.ownerDocument;
+    const walker=doc.createTreeWalker(container,NodeFilter.SHOW_TEXT);
+    const nodes=[];let node;
+    while((node=walker.nextNode())){
+      if(!node.nodeValue?.trim()||node.nodeValue.length>15000)continue;
+      if(node.parentElement?.closest('script,style,pre,code,textarea,svg,math,noscript,a,[data-violet-regex-skip]'))continue;
+      nodes.push(node);
+    }
+    let applied=0;
+    for(const textNode of nodes){
+      if(applied>=300||!textNode.parentNode)break;
+      const value=textNode.nodeValue;
+      matcher.lastIndex=0;const fragment=doc.createDocumentFragment();let cursor=0,local=0,m;
+      while((m=matcher.exec(value))!==null&&applied<300&&local<80){
+        if(!m[0]){matcher.lastIndex=Math.max(matcher.lastIndex+1,m.index+1);continue}
+        fragment.appendChild(doc.createTextNode(value.slice(cursor,m.index)));
+        const rawReplacement=templateReplacement1105(rule.replaceString,m[0],m.slice(1),m.groups);
+        // Only formatted replacement fragments pass through the existing sanitizer.
+        const withoutStyles=rawReplacement.replace(/<style\b[^>]*>[\s\S]*?<\/style\s*>/gi,'');
+        const safeMarkup=safeHtml(withoutStyles);
+        const template=doc.createElement('template');template.innerHTML=safeMarkup;
+        fragment.appendChild(template.content);
+        cursor=m.index+m[0].length;local++;applied++;
+        if(!matcher.global&&!matcher.sticky)break;
+        if(matcher.lastIndex<=m.index)matcher.lastIndex=cursor;
+      }
+      if(local){fragment.appendChild(doc.createTextNode(value.slice(cursor)));textNode.parentNode.replaceChild(fragment,textNode)}
+    }
+    return applied;
+  }
+  function applyStoryRules1105(container,storyId,customRules){
+    const rules=customRules||ensureRules1105();
+    let count=0;
+    for(const rule of rules){
+      if(!ruleApplies1105(rule,storyId))continue;
+      count+=applySingleRule1105(container,rule);
+    }
+    return count;
+  }
+
+  function enhanceRegexPanel1105(){
+    const parent=$('#pageContent');if(!parent)return;
+    const panel=document.createElement('section');panel.id='violetRegexPanel';panel.className='panel violet-regex-panel';
+    const rules=ensureRules1105();
+    panel.innerHTML=`<h3>✧ 番外美化正则</h3>
+      <p>追加式阅读美化：不会覆盖原稿，也不会替换现有 HTML、Markdown 或 CSS 渲染。可为全部番外或指定番外设置独立规则。</p>
+      <div class="violet-regex-toolbar"><button class="button secondary" data-action="violet-regex-import">导入正则 JSON</button><button class="button secondary" data-action="violet-regex-new">＋ 新建正则</button><button class="button secondary" data-action="violet-regex-export">导出正则 JSON</button><button class="button secondary" data-action="violet-regex-preview">预览效果</button></div>
+      <input id="violetRegexImportFile" type="file" accept=".json,application/json" hidden>
+      ${rules.length?rules.map(r=>`<div class="violet-regex-rule"><div class="violet-regex-rule-info"><strong>${esc(r.name)}</strong><br><small>${r.scope==='selected'?`指定番外 · ${(r.storyIds||[]).length} 篇`:'全部番外'} · ${r.enabled===false?'已停用':'已启用'}</small></div><div class="violet-regex-actions"><button data-action="violet-regex-toggle" data-id="${esc(r.id)}">${r.enabled===false?'启用':'停用'}</button><button data-action="violet-regex-edit" data-id="${esc(r.id)}">编辑</button><button data-action="violet-regex-delete" data-id="${esc(r.id)}">删除</button></div></div>`).join(''):'<p class="muted">还没有美化规则。可以导入已有正则 JSON，或者新建一条。</p>'}
+      <p class="muted">支持 $1、$2、$&、{{match}} 等替换占位符；正则只匹配阅读后可见的普通文本节点，跳过代码、链接、CSS 和 HTML 标签。复杂跨元素匹配暂不支持。请只导入信任的正则。</p>`;
+    parent.appendChild(panel);
+    bindActionButtons(panel);
+    panel.querySelector('#violetRegexImportFile').addEventListener('change',handleRegexImport1105);
+  }
+  function editRegex1105(id){
+    const r=id?ensureRules1105().find(x=>x.id===id):null;
+    if(id&&!r)return;
+    const title=r?'编辑美化正则':'新建美化正则';
+    const selected=new Set(r?.storyIds||[]);
+    const dlg=showDialog1105('violetRegexEditDialog',`
+      <h3>${title}</h3>
+      <p class="muted">这里只设置阅读时的附加美化；原稿不改变。替换内容可以写安全的 HTML 标签和行内样式。</p>
+      <form id="violetRegexEditForm">
+        <label>规则名称<input name="ruleName" required maxlength="120" value="${esc(r?.name||'')}"></label>
+        <label>匹配正则（支持 /表达式/g 或单独表达式）<textarea name="findRegex" rows="3" required spellcheck="false">${esc(r?.findRegex||'')}</textarea></label>
+        <label>flags（可选，例如 gi）<input name="regexFlags" value="${esc(r?.flags||'')}"></label>
+        <label>替换内容（HTML / $1 捕获组）<textarea name="replaceString" rows="6" spellcheck="false">${esc(r?.replaceString||'')}</textarea></label>
+        <label>应用范围<select name="ruleScope"><option value="all" ${r?.scope!=='selected'?'selected':''}>全部番外</option><option value="selected" ${r?.scope==='selected'?'selected':''}>仅指定番外</option></select></label>
+        <div class="violet-story-options" id="violetRuleStoryOptions">${(state.stories||[]).map(st=>`<label><input type="checkbox" name="storyId" value="${esc(st.id)}" ${selected.has(st.id)?'checked':''}>${esc(st.title)}</label>`).join('')||'暂无番外'}</div>
+        <label><input name="ruleEnabled" type="checkbox" ${r?.enabled===false?'':'checked'}> 启用此规则</label>
+        <div class="violet-extra-actions"><button type="button" data-violet-cancel>取消</button><button type="button" id="violetTestCurrentRegex">预览正则</button><button class="button primary" type="submit">保存规则</button></div>
+      </form>`);
+    const form=dlg.querySelector('form');
+    const showScope=()=>{dlg.querySelector('#violetRuleStoryOptions').hidden=form.elements.ruleScope.value!=='selected'};
+    form.elements.ruleScope.addEventListener('change',showScope);showScope();
+    const readDraft=()=>normalizeRule1105({name:form.elements.ruleName.value,findRegex:form.elements.findRegex.value,flags:form.elements.regexFlags.value,replaceString:form.elements.replaceString.value,scope:form.elements.ruleScope.value,storyIds:[...form.querySelectorAll('[name="storyId"]:checked')].map(x=>x.value),enabled:form.elements.ruleEnabled.checked});
+    dlg.querySelector('#violetTestCurrentRegex').addEventListener('click',()=>{
+      try{
+        const draft=readDraft();
+        if(draft.scope==='selected'&&!draft.storyIds.length){toast('请至少选择一篇番外');return}
+        openRegexPreview1105([draft]);
+      }catch(error){toast(error.message)}
+    });
+    form.addEventListener('submit',e=>{
+      e.preventDefault();
+      try{
+        const draft=readDraft();
+        if(draft.scope==='selected'&&!draft.storyIds.length){toast('请至少选择一篇番外');return}
+        draft.id=r?.id||draft.id;
+        const rules=ensureRules1105();
+        const updated=r?rules.map(x=>x.id===r.id?draft:x):[...rules,draft];
+        if(saveRules1105(updated,'美化正则已保存'))dlg.close();
+      }catch(error){toast(error.message)}
+    });
+  }
+  async function handleRegexImport1105(e){
+    const input=e.currentTarget,file=input.files?.[0];if(!file)return;
+    try{
+      if(!/\.json$/i.test(file.name)||file.size>1024*1024)throw new Error('请选择不超过 1MB 的 JSON 正则文件。');
+      const entries=extractRules1105(JSON.parse(await file.text()));
+      if(!entries.length||entries.length>100)throw new Error('正则文件应包含 1～100 条规则。');
+      const imported=entries.map((rule,i)=>normalizeRule1105(rule,i));
+      const existing=ensureRules1105();
+      if(!confirm(`将导入 ${imported.length} 条正则并追加到现有 ${existing.length} 条规则后面。\n导入前请确认文件来源可信。继续吗？`))return;
+      saveRules1105([...existing,...imported],`已导入 ${imported.length} 条美化正则`);
+    }catch(error){toast('正则导入失败：'+error.message)}
+    finally{input.value=''}
+  }
+  function openRegexPreview1105(customRules){
+    if(!(state.stories||[]).length){toast('请先收藏一篇番外');return}
+    const st=state.stories.find(s=>s.id===state.activeStoryId)||state.stories[0];
+    const dlg=showDialog1105('violetRegexPreviewDialog',`
+      <h3>正则美化预览</h3><label>预览番外<select id="violetPreviewStory">${state.stories.map(s=>`<option value="${esc(s.id)}" ${s.id===st.id?'selected':''}>${esc(s.title)}</option>`).join('')}</select></label>
+      <p id="violetPreviewCount" class="muted"></p>
+      <div class="violet-preview-area reader-body" id="violetRegexPreviewBody"></div>
+      <p class="muted">仅在此窗口预览，不改变正文原稿；跨 HTML 元素的正则匹配不会执行。</p>
+      <div class="violet-extra-actions"><button type="button" data-violet-cancel>关闭</button></div>`);
+    const select=dlg.querySelector('#violetPreviewStory'),body=dlg.querySelector('#violetRegexPreviewBody');
+    const doPreview=()=>{
+      const story=state.stories.find(s=>s.id===select.value);if(!story)return;
+      body.innerHTML=bodyHTML(story);
+      const count=applyStoryRules1105(body,story.id,customRules);
+      dlg.querySelector('#violetPreviewCount').textContent=`当前显示：${story.title} · 本次匹配替换 ${count} 处`;
+    };
+    select.addEventListener('change',doPreview);doPreview();
+  }
+  function regexAction1105(name,id){
+    const rules=ensureRules1105();
+    const r=rules.find(x=>x.id===id);
+    if(name==='violet-regex-new'){editRegex1105();return}
+    if(name==='violet-regex-edit'){editRegex1105(id);return}
+    if(name==='violet-regex-toggle'&&r){saveRules1105(rules.map(x=>x.id===id?{...x,enabled:x.enabled===false}:x),'正则启用状态已保存');return}
+    if(name==='violet-regex-delete'&&r){if(confirm(`删除美化正则「${r.name}」？不会影响番外原稿。`))saveRules1105(rules.filter(x=>x.id!==id),'美化正则已删除');return}
+    if(name==='violet-regex-import'){$('#violetRegexImportFile')?.click();return}
+    if(name==='violet-regex-export'){download('Violet-Storybook-Regex-Rules.json',new Blob([JSON.stringify({regexRules:rules},null,2)],{type:'application/json'}));return}
+    if(name==='violet-regex-preview'){openRegexPreview1105();return}
+  }
+
+  render=function violetRenderWithAdditions1105(){
+    originalRender1105();
+    installStyles1105();ensureRules1105();
+    if(currentPage==='characters')enhanceCharacters1105();
+    if(currentPage==='series')enhanceSeries1105();
+    if(currentPage==='themes')enhanceRegexPanel1105();
+  };
+  openReader=function violetOpenReaderWithRegex1105(st){
+    originalOpenReader1105(st);
+    try{applyStoryRules1105($('#readerBody'),st.id)}
+    catch(error){console.error('附加美化正则渲染失败：',error);toast('部分美化正则渲染失败，正文原稿未受影响。')}
+  };
+  action=function violetActionWithAdditions1105(name,id,button){
+    if(name==='violet-delete-character'){deleteCharacter1105(id);return}
+    if(name==='violet-avatar'){openAvatar1105(id);return}
+    if(name==='violet-toggle-series'){toggleSeries1105(id);return}
+    if(name.startsWith('violet-regex-')){regexAction1105(name,id);return}
+    return originalAction1105(name,id,button);
+  };
+  // The original startup has already run above; refresh once so added controls show.
+  render();
+})();
