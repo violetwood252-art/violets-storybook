@@ -1579,11 +1579,30 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       const body=document.body;if(!body)return;
       const box=body.getBoundingClientRect();const css=getComputedStyle(body);
       const margins=(parseFloat(css.marginTop)||0)+(parseFloat(css.marginBottom)||0);
-      // Measure the content itself: documentElement.scrollHeight is at least
-      // the previous iframe viewport height and would prevent shrinking.
-      // Top margins on a template's first block can collapse outside body.
-      // Include body's actual bottom position, not just its box height.
-      const proposed=Math.ceil(Math.max(box.height,box.bottom)+margins+3);
+      // Measure actual content, not documentElement.scrollHeight (which can
+      // retain the previous viewport height after a collapsible panel closes).
+      // First-child margins may collapse outside body. Some templates also
+      // position decorative descendants outside their own parent, e.g. a
+      // bottom:-20px caption; the iframe must fit those painted descendants.
+      const baseBottom=Math.max(box.height,box.bottom);
+      let paintedBottom=baseBottom;
+      body.querySelectorAll('*').forEach(node=>{
+        // Browsers may report bounding boxes for descendants of a closed
+        // <details> even though only its <summary> is actually painted.
+        const closed=node.closest('details:not([open])');
+        if(closed){
+          const summary=closed.querySelector(':scope > summary');
+          if(!summary||(node!==summary&&!summary.contains(node)))return;
+        }
+        const rect=node.getBoundingClientRect();
+        if(!rect.width||!rect.height||!Number.isFinite(rect.bottom)||rect.bottom<=paintedBottom)return;
+        if(getComputedStyle(node).position==='fixed')return;
+        paintedBottom=Math.max(paintedBottom,rect.bottom);
+      });
+      // Keep ordinary templates' existing spacing. Allow a little extra
+      // only when an element protrudes below its parent's layout bounds.
+      const proposed=Math.ceil(paintedBottom>baseBottom+1
+        ? paintedBottom+margins+8 : baseBottom+margins+3);
       if(Math.abs(proposed-height)>2){height=proposed;post('resize',{height:proposed})}
     }
     window.addEventListener('DOMContentLoaded',()=>{
