@@ -931,7 +931,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
  * The original 1105 lines above are preserved verbatim. No original renderer,
  * CSS theme, player, story source or persistence key has been replaced.
  * Features: character deletion, avatars, scoped regex, series accordion.
- * Additional compatible features: series avatars, complex GC local interaction,
+ * Additional compatible features: series avatars, isolated generic rich renderer,
  * regex deletion, theme & music list accordions.
  * ========================================================================== */
 (function violet1105Enhancements(){
@@ -1317,71 +1317,55 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     return count;
   }
 
-  /* Rich SillyTavern-style regex compatibility: separate from the 1105 renderer.
-     Imported scripts never run. A scoped Shadow DOM displays the authored HTML/CSS,
-     while a locally implemented adapter handles supported GC chat controls. */
-  const CHAT_STORAGE_1105=KEY+'-rich-chat-v1';
+  /* Generic rich-template renderer for imported regex JSON.
+     Independent Storybook implementation: no built-in chat/forum/status markup.
+     Imported HTML/CSS/JS runs only inside a sandboxed, opaque-origin iframe.
+     The host exposes only an allowlisted, bounded local-interaction bridge. */
+  const RICH_STORE_KEY_1105=KEY+'-rich-chat-v1'; // Retain existing storage slot.
   const MAX_RICH_MATCHES_1105=25;
+  const RICH_BRIDGE_CHANNEL_1105='violet-storybook-rich-v2';
+  const richFrames1105=new Map();
+  let richBridgeInstalled1105=false;
   function richRule1105(rule){
     const replacement=String(rule?.replaceString||'');
-    return /<style\b|<script\b|class\s*=\s*["'][^"']*(?:gc-wrapper|chat|phone|status)/i.test(replacement);
+    return /<style\b|<script\b|<\/?(?:div|section|article|main|table|form|button|input|textarea|select|figure|header|footer|details)\b/i.test(replacement) ||
+      /\bon(?:click|input|change|submit|keydown)\s*=/i.test(replacement);
   }
-  function getChatStore1105(){
-    try{const data=JSON.parse(localStorage.getItem(CHAT_STORAGE_1105)||'{}');return data&&typeof data==='object'&&!Array.isArray(data)?data:{}}
+  function getRichStore1105(){
+    try{const data=JSON.parse(localStorage.getItem(RICH_STORE_KEY_1105)||'{}');return data&&typeof data==='object'&&!Array.isArray(data)?data:{}}
     catch{return {}}
   }
-  function getChatData1105(key){
-    const data=getChatStore1105()[key];
-    return data&&typeof data==='object'?{
-      posts:Array.isArray(data.posts)?data.posts.slice(-80):[],
-      received:data.received&&typeof data.received==='object'?data.received:{},
-      transfers:data.transfers&&typeof data.transfers==='object'?data.transfers:{}
-    }:{posts:[],received:{},transfers:{}};
+  function getRichEntry1105(key){
+    const raw=getRichStore1105()[key];
+    const values=raw?.values&&typeof raw.values==='object'&&!Array.isArray(raw.values)?raw.values:{};
+    // The earlier interaction adapter stored posts; preserve them as read-only history
+    // instead of silently erasing them during the renderer migration.
+    const messages=Array.isArray(raw?.messages)?raw.messages:
+      Array.isArray(raw?.posts)?raw.posts.map(p=>({text:String(p?.text||''),time:String(p?.time||'')})):[];
+    return {values:Object.fromEntries(Object.entries(values).filter(([k,v])=>typeof k==='string'&&k.length<=120&&typeof v==='string'&&v.length<=30000).slice(0,100)),
+      messages:messages.filter(p=>p&&typeof p.text==='string').slice(-60).map(p=>({text:p.text.slice(0,4000),time:String(p.time||'').slice(0,60)}))};
   }
-  function saveChatData1105(key,data){
+  function saveRichEntry1105(key,entry){
     try{
-      const stored=getChatStore1105();stored[key]={posts:data.posts.slice(-80),received:data.received,transfers:data.transfers};
-      const keys=Object.keys(stored);if(keys.length>120)keys.slice(0,keys.length-120).forEach(k=>delete stored[k]);
-      localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));return true;
-    }catch(error){console.warn('独立群聊记录未能保存到本机：',error);toast('互动已显示，但本地存储空间不足，刷新后可能丢失。');return false}
+      const store=getRichStore1105();
+      const previous=store[key];
+      // Keep legacy fields (if any) intact; the renderer never interprets them.
+      store[key]={...(previous&&typeof previous==='object'?previous:{}),values:entry.values,messages:entry.messages};
+      const keys=Object.keys(store);if(keys.length>120)keys.slice(0,keys.length-120).forEach(k=>delete store[k]);
+      localStorage.setItem(RICH_STORE_KEY_1105,JSON.stringify(store));
+      return true;
+    }catch(error){console.warn('美化互动本地保存失败：',error);return false}
   }
-  function isSafeCss1105(text){
-    return String(text||'').replace(/@import\s+(?:url\([^;]*\)|[^;]*);?/gi,'')
-      .replace(/url\s*\([^)]*\)/gi,'none')
-      .replace(/expression\s*\(/gi,'blocked(')
-      .replace(/:root\b/g,':host');
-  }
-  function sanitizeRichMarkup1105(markup){
-    const doc=new DOMParser().parseFromString(String(markup||''),'text/html');
-    doc.querySelectorAll('script,style,iframe,object,embed,base,link,meta,template,svg,math,foreignObject').forEach(n=>n.remove());
-    doc.body.querySelectorAll('*').forEach(el=>{
-      [...el.attributes].forEach(attr=>{
-        const name=attr.name.toLowerCase(),value=attr.value||'',trimmed=value.trim();
-        if(name.startsWith('on')||name==='srcdoc'||name==='formaction'||name==='action'||name==='target'){el.removeAttribute(attr.name);return}
-        if(['href','src','poster','xlink:href'].includes(name)){
-          if(!/^(?:https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif);base64,|#)/i.test(trimmed))el.removeAttribute(attr.name);
-          return;
-        }
-        if(name==='srcset'){el.removeAttribute(attr.name);return}
-        if(name==='style'&&/(?:expression\s*\(|javascript\s*:|vbscript\s*:|behavior\s*:|url\s*\(|position\s*:\s*fixed)/i.test(value))el.removeAttribute(attr.name);
-      });
-      if(el.tagName==='A')el.setAttribute('rel','noopener noreferrer');
-    });
-    return doc.body;
-  }
-  function cleanRichTemplate1105(template){
-    let value=String(template||'').trim();
-    value=value.replace(/^```(?:html)?\s*\n?/i,'').replace(/\n?```\s*$/,'').replace(/<\/html\s*>\s*$/i,'');
-    const styles=[];
-    value=value.replace(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi,(_,css)=>{styles.push(isSafeCss1105(css));return ''});
-    value=value.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,'');
-    return {html:value,styles:styles.join('\n')};
+  function stripRichFence1105(value){
+    let text=String(value||'').trim();
+    text=text.replace(/^```(?:html|htm)?\s*\r?\n/i,'').replace(/\r?\n```\s*$/,'');
+    return text.replace(/<\/html\s*>\s*$/i,'');
   }
   function extractRichReplacements1105(story,rules){
     let source=String(story.body??'');const widgets=[];
     if(source.length>3000000)return {source,widgets};
     for(const rule of rules){
-      if(!ruleApplies1105(rule,story.id)||!richRule1105(rule))continue;
+      if(!ruleApplies1105(rule,story.id)||!richRule1105(rule)||rule.promptOnly===true)continue;
       let re;try{re=compileRegex1105(rule.findRegex,rule.flags)}catch(err){console.warn('复杂美化正则跳过：',err);continue}
       let currentCount=0;
       source=source.replace(re,(match,...args)=>{
@@ -1399,6 +1383,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     }
     return {source,widgets};
   }
+
   function compactRichBoundary1105(host){
     // Rich-regex placeholders are padded with newlines for Markdown splitting.
     // In mixed HTML/Markdown those generated separators can become empty blocks/BRs.
@@ -1457,160 +1442,181 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     }
     container.querySelectorAll('.violet-rich-widget').forEach(compactRichBoundary1105);
   }
+  function richFramePost1105(record,data){
+    try{record.frame.contentWindow?.postMessage({channel:RICH_BRIDGE_CHANNEL_1105,token:record.token,...data},'*')}
+    catch(error){console.warn('美化组件响应失败：',error)}
+  }
+  function ensureRichBridge1105(){
+    if(richBridgeInstalled1105)return;
+    richBridgeInstalled1105=true;
+    window.addEventListener('message',event=>{
+      const data=event.data;
+      if(!data||data.channel!==RICH_BRIDGE_CHANNEL_1105||typeof data.token!=='string')return;
+      let record;
+      for(const [id,item] of richFrames1105){
+        if(!item.frame.isConnected){richFrames1105.delete(id);continue}
+        if(item.token===data.token&&event.source===item.frame.contentWindow){record=item;break}
+      }
+      if(!record)return;
+      if(data.type==='resize'){
+        const proposed=Number(data.height);
+        if(!Number.isFinite(proposed))return;
+        const h=Math.max(90,Math.min(5200,Math.ceil(proposed)));
+        if(Math.abs(h-record.lastHeight)>2){record.frame.style.height=h+'px';record.lastHeight=h}
+        return;
+      }
+      const now=Date.now();
+      record.operations=(record.operations||[]).filter(t=>now-t<10000);
+      if(record.operations.length>=60){
+        if(data.type==='send')richFramePost1105(record,{type:'send-ack',id:data.id,ok:false});
+        return;
+      }
+      record.operations.push(now);
+      if(record.preview){
+        if(data.type==='send')richFramePost1105(record,{type:'send-ack',id:data.id,ok:true});
+        return;
+      }
+      if(data.type==='set' || data.type==='remove'){
+        const key=String(data.key??'');if(!key||key.length>120)return;
+        const entry=getRichEntry1105(record.key);
+        if(data.type==='remove')delete entry.values[key];
+        else{
+          const val=String(data.value??'');if(val.length>30000||Object.keys(entry.values).length>=100&&!(key in entry.values))return;
+          entry.values[key]=val;
+        }
+        saveRichEntry1105(record.key,entry);return;
+      }
+      if(data.type==='send'){
+        const value=String(data.text??'');
+        if(!value.trim()||value.length>4000){richFramePost1105(record,{type:'send-ack',id:data.id,ok:false});return}
+        const entry=getRichEntry1105(record.key);
+        entry.messages.push({text:value,time:new Date().toLocaleString('zh-CN')});
+        entry.messages=entry.messages.slice(-60);
+        const ok=saveRichEntry1105(record.key,entry);
+        richFramePost1105(record,{type:'send-ack',id:data.id,ok});
+      }
+    });
+  }
+  /* Only a tiny generic bridge is injected by Storybook. No template-specific
+     event handlers, selectors or style definitions are included here. */
+  const RICH_IFRAME_BRIDGE_1105=String.raw`(function(){
+    'use strict';
+    const CHANNEL='violet-storybook-rich-v2';
+    const boot=window.__storybookBoot;
+    const values=Object.assign(Object.create(null),boot.values||{});
+    const messages=Array.isArray(boot.messages)?boot.messages.slice(-60):[];
+    const pending=new Map();let seq=0;
+    function post(type,data){parent.postMessage(Object.assign({channel:CHANNEL,token:boot.token,type:type},data||{}),'*')}
+    function emit(type,detail){window.dispatchEvent(new CustomEvent(type,{detail:detail}))}
+    function updateLog(){
+      let node=document.getElementById('storybook-local-log');
+      if(!messages.length){if(node)node.remove();return}
+      if(!node){
+        node=document.createElement('details');node.id='storybook-local-log';
+        node.style.cssText='max-width:100%;margin:12px 0;padding:10px 12px;border:1px dashed #aaa;border-radius:9px;font:13px/1.6 system-ui,sans-serif;color:#555;overflow-wrap:anywhere;';
+        const summary=document.createElement('summary');summary.textContent='本地互动记录';summary.style.cursor='pointer';node.appendChild(summary);
+        const list=document.createElement('div');list.id='storybook-local-log-list';node.appendChild(list);
+        document.body.appendChild(node);
+      }
+      const list=node.querySelector('#storybook-local-log-list');list.replaceChildren();
+      messages.slice(-60).forEach(entry=>{const item=document.createElement('div');item.style.cssText='padding:7px 0;border-top:1px solid #eee;white-space:pre-wrap;';item.textContent=(entry.time?entry.time+'  ':'')+entry.text;list.appendChild(item)});
+    }
+    const api={
+      get:key=>Object.hasOwn(values,String(key))?values[String(key)]:null,
+      set:(key,value)=>{key=String(key);value=String(value);if(!key||key.length>120||value.length>30000)return false;values[key]=value;post('set',{key:key,value:value});return true},
+      remove:key=>{key=String(key);delete values[key];post('remove',{key:key})},
+      history:()=>messages.map(m=>({...m})),
+      send:text=>new Promise(resolve=>{text=String(text||'').trim();if(!text||text.length>4000){resolve(false);return}
+        const id=++seq;pending.set(id,{resolve:resolve,text:text});post('send',{id:id,text:text});
+        setTimeout(()=>{const p=pending.get(id);if(p){pending.delete(id);p.resolve(false)}},2500);
+      })
+    };
+    window.StorybookLocal=Object.freeze(api);
+    // Opaque-origin iframe has no native localStorage. This optional in-memory
+    // compatible storage allows authored templates to persist basic UI state.
+    const storage={
+      getItem:key=>api.get(key),setItem:(key,value)=>api.set(key,value),removeItem:key=>api.remove(key),
+      clear:()=>Object.keys(values).forEach(key=>api.remove(key)),
+      key:i=>Object.keys(values)[i]??null,get length(){return Object.keys(values).length}
+    };
+    try{Object.defineProperty(window,'localStorage',{configurable:true,value:storage})}catch(e){}
+    try{Object.defineProperty(window,'sessionStorage',{configurable:true,value:storage})}catch(e){}
+    // Only /send is emulated. /trigger, generation, AI APIs and slash command
+    // chains are NOT executed against the host application.
+    window.triggerSlash=async command=>{
+      const text=String(command||'');if(!/^\s*\/send\s+/i.test(text))return false;
+      const payload=text.replace(/^\s*\/send\s+/i,'').replace(/\s*\|\s*\/trigger\s*$/i,'');
+      return api.send(payload);
+    };
+    window.sillyTavern={send:command=>window.triggerSlash(command)};
+    // Generic image lightbox. No navigation or new browser window is permitted
+    // from untrusted templates; image previews stay inside the iframe.
+    window.open=function(url){
+      try{
+        const target=new URL(String(url||''),document.baseURI);
+        if(!['http:','https:','data:'].includes(target.protocol) ||
+          !(/\.(?:png|jpe?g|gif|webp|avif)(?:$|[?#])/i.test(target.href)||target.protocol==='data:'))return null;
+        const cover=document.createElement('div');
+        cover.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.86);display:flex;align-items:center;justify-content:center;z-index:2147483600;padding:20px;cursor:zoom-out;';
+        const img=document.createElement('img');img.src=target.href;img.alt='图片预览';
+        img.style.cssText='max-width:100%;max-height:100%;object-fit:contain;';cover.appendChild(img);
+        cover.addEventListener('click',()=>cover.remove());document.body.appendChild(cover);
+        return {closed:false,close:()=>cover.remove()};
+      }catch(e){return null}
+    };
+    window.addEventListener('message',event=>{
+      if(event.source!==parent)return;
+      const data=event.data;if(!data||data.channel!==CHANNEL||data.token!==boot.token)return;
+      if(data.type==='send-ack'){
+        const p=pending.get(data.id);if(!p)return;pending.delete(data.id);
+        if(data.ok){messages.push({text:p.text,time:new Date().toLocaleString('zh-CN')});
+          if(messages.length>60)messages.shift();updateLog();emit('storybook:local-message',{text:p.text})}
+        p.resolve(Boolean(data.ok));
+      }
+    });
+    let height=0;
+    function measure(){
+      const body=document.body;if(!body)return;
+      const box=body.getBoundingClientRect();const css=getComputedStyle(body);
+      const margins=(parseFloat(css.marginTop)||0)+(parseFloat(css.marginBottom)||0);
+      // Measure the content itself: documentElement.scrollHeight is at least
+      // the previous iframe viewport height and would prevent shrinking.
+      const proposed=Math.ceil(box.height+margins+3);
+      if(Math.abs(proposed-height)>2){height=proposed;post('resize',{height:proposed})}
+    }
+    window.addEventListener('DOMContentLoaded',()=>{
+      updateLog();measure();
+      if(window.ResizeObserver){new ResizeObserver(measure).observe(document.body)}
+      if(window.MutationObserver){new MutationObserver(()=>requestAnimationFrame(measure)).observe(document.body,{childList:true,subtree:true})}
+      window.addEventListener('load',measure);setTimeout(measure,150);setTimeout(measure,700);
+    });
+  })();`;
   function buildRichWidget1105(doc,widget,preview=false){
     const host=doc.createElement('div');host.className='violet-rich-widget';host.dataset.violetRegexSkip='1';
-    host.style.cssText='display:block;max-width:100%;min-width:0;margin:16px auto;contain:layout style;';
-    const root=host.attachShadow({mode:'open'});
-    const cleaned=cleanRichTemplate1105(widget.html);
-    const style=doc.createElement('style');
-    style.textContent=`:host{display:block;max-width:100%;min-width:0;color:#595959;font-family:system-ui,sans-serif}:host *, :host *::before, :host *::after{box-sizing:border-box}img{max-width:100%}button,input{font:inherit} ${cleaned.styles}`;
-    root.appendChild(style);
-    const safeBody=sanitizeRichMarkup1105(cleaned.html);
-    while(safeBody.firstChild)root.appendChild(doc.importNode(safeBody.firstChild,true)),safeBody.removeChild(safeBody.firstChild);
-    const wrappers=root.querySelectorAll('.gc-wrapper');
-    wrappers.forEach((wrapper,idx)=>initGcChat1105(root,wrapper,widget.key+'__'+idx,preview));
-    if(!wrappers.length){
-      // Even non-chat templates retain their visual CSS; imported JS is never executed.
-      root.querySelectorAll('form').forEach(form=>form.addEventListener('submit',e=>e.preventDefault()));
-    }
+    host.style.cssText='display:block;max-width:100%;min-width:0;margin:8px auto 12px;';
+    const frame=doc.createElement('iframe');
+    frame.className='violet-rich-frame';frame.title='美化互动：'+String(widget.ruleName||'自定义模板');
+    frame.setAttribute('sandbox','allow-scripts');
+    frame.setAttribute('scrolling','no');
+    frame.style.cssText='display:block;box-sizing:border-box;border:0;width:100%;max-width:100%;height:120px;background:transparent;';
+    host.appendChild(frame);
+    ensureRichBridge1105();
+    const token=uid('rich');
+    const record={frame,token,key:widget.key,preview,lastHeight:120};
+    richFrames1105.set(token,record);
+    const saved=preview?{values:{},messages:[]}:getRichEntry1105(widget.key);
+    const boot=JSON.stringify({token,values:saved.values,messages:saved.messages}).replace(/</g,'\\u003c').replace(/>/g,'\\u003e').replace(/&/g,'\\u0026');
+    const raw=stripRichFence1105(widget.html);
+    const csp="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https:; img-src https: data: blob:; font-src https: data:; media-src https: data: blob:; connect-src 'none'; object-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'";
+    // No allow-same-origin, allow-top-navigation or allow-popups. A template cannot
+    // read Storybook's DOM, storage, data or API keys through this iframe.
+    frame.srcdoc='<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'+
+      '<meta http-equiv="Content-Security-Policy" content="'+csp+'">'+
+      '<style>html,body{max-width:100%;box-sizing:border-box}body{margin:0;padding:0}*,*::before,*::after{box-sizing:border-box}img,video,svg,canvas{max-width:100%}</style>'+
+      '<script>window.__storybookBoot='+boot+';<\\/script>'.replace('\\/script','/script')+
+      '<script>'+RICH_IFRAME_BRIDGE_1105+'<\\/script>'.replace('\\/script','/script')+
+      '</head><body>'+raw+'</body></html>';
     return host;
-  }
-  function initGcChat1105(root,wrapper,key,preview){
-    const chatBox=wrapper.querySelector('.js-gc-chat-box'),raw=wrapper.querySelector('.js-gc-raw');
-    if(!chatBox||!raw)return;
-    const group=wrapper.querySelector('.gc-group-name')?.textContent?.trim()||'群聊';
-    const data=preview?{posts:[],received:{},transfers:{}}:getChatData1105(key);
-    const queued=[];let messageIndex=0;
-    const resolveImage=(input)=>{
-      let val=String(input||'').trim();
-      if(!val||val==='none'||val==='null')return '';
-      if(!/^https?:\/\//i.test(val))val='https://image.uglycat.cc/'+val;
-      return safeImageSource(val);
-    };
-    const avatarHtml=(name,avatar)=>{
-      const src=resolveImage(avatar);
-      if(src)return `<img class="gc-avatar" alt="头像" src="${esc(src)}">`;
-      const palette=['#ff8ba7','#8ac6d1','#c5a3ff','#ffb38a','#a3e4d7','#f9e79f','#f1948a','#85c1e9'];
-      let hash=0;for(const ch of String(name))hash=(hash*31+ch.charCodeAt(0))|0;
-      return `<div class="gc-avatar gc-avatar-text" style="background:${palette[Math.abs(hash)%palette.length]}">${esc(Array.from(name)[0]||'?')}</div>`;
-    };
-    const formatTime=()=>new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
-    const bubble=(line,isSelf,recordKey)=>{
-      const text=String(line||'').trim();let m;
-      if((m=text.match(/\{红包\|([\d.]+)\|(\d+)(?:\|([^|{}]*))?(?:\|([^|{}]*))?\}/))){
-        const total=Number(m[1]),count=Number(m[2]),bless=m[3]||'恭喜发财，大吉大利';
-        const claimed=!!data.received[recordKey],records=(m[4]||'').split(';').filter(Boolean);
-        const opened=claimed||records.length>=count;
-        return `<div class="gc-special-bubble gc-type-redpacket"><div class="gc-bubble-label">红包</div><div class="gc-redpacket-card ${opened?'opened':''}" data-rp-key="${esc(recordKey)}" data-rp-total="${esc(String(total))}" data-rp-count="${esc(String(count))}" data-rp-sender="${isSelf?'self':'other'}"><div class="gc-rp-top"><div class="gc-rp-coin">¥</div><div class="gc-rp-info"><div class="gc-rp-bless">${esc(bless)}</div><div class="gc-rp-state">${isSelf?'你发出的红包':claimed?'已领取':opened?'已被抢完':'点击拆红包'}</div></div></div><div class="gc-rp-bottom"><span>拼手气红包</span><span>${records.length+(claimed?1:0)}/${count}</span></div></div><div class="gc-rp-detail ${claimed?'show':''}" style="${claimed?'':'display:none'}">${claimed?'你已领取 ¥'+esc(String(data.received[recordKey])):'点击红包查看领取状态'}</div></div>`;
-      }
-      if((m=text.match(/\{转账\|([^|{}]+?)(?:\|([^|{}]*))?\}/))){
-        const collected=!!data.transfers[recordKey];
-        return `<div class="gc-special-bubble gc-type-transfer"><div class="gc-bubble-label">转账</div><div class="gc-transfer-card ${collected?'collected':isSelf?'own':''}" data-transfer-key="${esc(recordKey)}" data-transfer-sender="${isSelf?'self':'other'}"><div class="gc-transfer-icon">¥</div><div class="gc-transfer-detail"><div class="gc-transfer-amount">¥${esc(m[1])}</div><div class="gc-transfer-note">${collected?'已收款':esc(m[2]|| (isSelf?'已转出':'点击收款'))}</div></div><div class="gc-transfer-brand">群聊转账</div></div></div>`;
-      }
-      if((m=text.match(/\{位置\|([^|{}]+?)(?:\|([^|{}]*))?\}/)))return `<div class="gc-special-bubble gc-type-location"><div class="gc-bubble-label">位置</div><div class="gc-location-card"><div class="gc-location-map">📍</div><div class="gc-location-info"><div class="gc-location-name">${esc(m[1])}</div><div class="gc-location-addr">${esc(m[2]||'共享位置')}</div></div></div></div>`;
-      if((m=text.match(/\{图片\|([^|{}]+?)(?:\|([^|{}]*))?\}/))){const src=resolveImage(m[1]);return `<div class="gc-special-bubble gc-type-image"><div class="gc-bubble-label">图片</div><div class="gc-image-card">${src?`<img src="${esc(src)}" alt="${esc(m[2]||'图片')}" loading="lazy">`:''}<div class="gc-image-desc">${esc(m[2]||'')}</div></div></div>`}
-      if((m=text.match(/\{语音\|(\d+)\|([^|{}]+?)\}/)))return `<div class="gc-special-bubble gc-type-voice" data-duration="${esc(m[1])}"><div class="gc-bubble-label">语音</div><div class="gc-voice-main"><span class="gc-voice-play">▶</span><div class="gc-voice-bars">${Array.from({length:12},(_,i)=>`<span class="gc-vbar" style="height:${7+(i*7%14)}px"></span>`).join('')}</div><span class="gc-voice-dur">${esc(m[1])}″</span></div><div class="gc-voice-hint">点击查看语音文字与模拟播放</div><div class="gc-voice-trans" style="display:none">${esc(m[2])}</div></div>`;
-      const bareImage=text.match(/^(?:\{表情\|)?([a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp))\}?$/i);
-      if(bareImage){const src=resolveImage(bareImage[1]);return src?`<div class="gc-sticker-bubble"><img class="gc-sticker-img" alt="表情" src="${esc(src)}" loading="lazy"></div>`:''}
-      // A single line may mix normal text with image filenames; preserve the
-      // original GC template's inline-sticker behavior without executing HTML.
-      const chunks=text.split(/([a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp))/gi);
-      return chunks.filter(chunk=>chunk.trim()).map(chunk=>{
-        if(/^[a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp)$/i.test(chunk)){
-          const url=resolveImage(chunk);
-          return url?`<div class="gc-sticker-bubble"><img class="gc-sticker-img" alt="表情" src="${esc(url)}" loading="lazy"></div>`:'';
-        }
-        return `<div class="gc-msg-bubble">${esc(chunk).replace(/@([\p{L}\p{N}_-]+)/gu,'<span class="gc-at-tag">@$1</span>')}</div>`;
-      }).join('');
-    };
-    const addMessage=(sender,time,avatar,content,isSelf,recordPrefix)=>{
-      const row=document.createElement('div');row.className='gc-msg-row '+(isSelf?'right':'left');
-      const lines=String(content||'').split(/\n/).map(s=>s.trim()).filter(Boolean);
-      row.innerHTML=avatarHtml(sender,avatar)+`<div class="gc-msg-content"><div class="gc-msg-name">${isSelf?`<span>${esc(time)}</span> ${esc(sender)}`:`${esc(sender)} <span>${esc(time)}</span>`}</div>${lines.map((line,i)=>bubble(line,isSelf,recordPrefix+'_'+i)).join('')}</div>`;
-      chatBox.appendChild(row);chatBox.scrollTop=chatBox.scrollHeight;return row;
-    };
-    const matches=[...raw.textContent.trim().matchAll(/\[([^\]|]*)\|([^\]|]*)\|([^\]|]*)\]([\s\S]*?)(?=\n\s*\[|$)/g)];
-    matches.forEach((m,i)=>{
-      const sender=m[1].trim(),isSelf=sender==='{{user}}'||sender==='我';
-      addMessage(isSelf?'我':sender,m[2].trim(),m[3].trim(),m[4],isSelf,'original_'+i);
-    });
-    data.posts.forEach((post,i)=>{if(post&&typeof post.text==='string')addMessage('我',String(post.time||''),'',post.text,true,'post_'+i)});
-    const queueBar=wrapper.querySelector('.gc-queue-bar'),queueText=wrapper.querySelector('.gc-queue-text');
-    const closePanel=()=>{wrapper.querySelector('.gc-panel')?.classList.remove('active');wrapper.querySelector('.gc-add-btn')?.classList.remove('open')};
-    const showQueue=()=>{
-      if(!queueBar)return;queueBar.style.display=queued.length?'flex':'none';
-      if(queueText)queueText.textContent=queued.length+' 项操作待发送：'+queued.map(x=>x.label).join(' / ');
-    };
-    const queueOperation=(label,text)=>{queued.push({label,text});showQueue();closePanel()};
-    const persistInteraction=()=>{if(!preview)saveChatData1105(key,data)};
-    const sendMessage=()=>{
-      const input=wrapper.querySelector('.gc-chat-input'),value=input?.value?.trim()||'';
-      if(!value&&!queued.length){if(input)input.placeholder='请输入内容或先添加操作…';return}
-      const content=[...queued.map(x=>x.text),value].filter(Boolean).join('\n');
-      const index=data.posts.length;data.posts.push({text:content,time:formatTime()});
-      if(data.posts.length>80)data.posts.shift();
-      addMessage('我',formatTime(),'',content,true,'post_'+index);
-      queued.length=0;showQueue();if(input)input.value='';persistInteraction();
-    };
-    wrapper.addEventListener('submit',e=>e.preventDefault());
-    wrapper.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('.gc-chat-input')){e.preventDefault();sendMessage()}});
-    wrapper.addEventListener('click',event=>{
-      const el=event.target instanceof Element?event.target:null;if(!el)return;
-      if(el.closest('.gc-add-btn')){wrapper.querySelector('.gc-panel')?.classList.toggle('active');el.closest('.gc-add-btn').classList.toggle('open');return}
-      if(el.closest('.gc-panel-close')){closePanel();return}
-      const tab=el.closest('.gc-panel-tab');if(tab){
-        const classes=['sticker','redpacket','transfer','location','image','voice'];
-        const selected=classes[[...tab.parentNode.children].indexOf(tab)];
-        wrapper.querySelectorAll('.gc-panel-tab').forEach(x=>x.classList.toggle('active',x===tab));
-        wrapper.querySelectorAll('.gc-panel-view').forEach(x=>x.classList.toggle('active',x.classList.contains('gc-view-'+selected)));return;
-      }
-      const sticker=el.closest('.gc-sticker-item');if(sticker){const input=wrapper.querySelector('.gc-chat-input');if(input){const name=(sticker.getAttribute('src')||'').split('/').pop();input.value=input.value?input.value+'\n'+name:name;input.focus()}closePanel();return}
-      if(el.closest('.gc-queue-clear')){queued.length=0;showQueue();return}
-      const confirm=el.closest('.gc-panel-confirm');if(confirm){
-        const view=confirm.closest('.gc-panel-view');
-        const val=cls=>view?.querySelector(cls)?.value?.trim()||'';
-        if(view?.classList.contains('gc-view-redpacket')){
-          const amount=Number(val('.gc-rp-amount')),count=Number(val('.gc-rp-count'));if(!Number.isFinite(amount)||amount<=0||!Number.isInteger(count)||count<1||amount<count*.01){toast('红包金额或份数不正确');return}
-          queueOperation('红包','{红包|'+amount.toFixed(2)+'|'+count+'|'+(val('.gc-rp-bless-input')||'恭喜发财，大吉大利')+'}');
-        }else if(view?.classList.contains('gc-view-transfer')){
-          const target=val('.gc-tf-target'),amount=Number(val('.gc-tf-amount'));if(!target||!Number.isFinite(amount)||amount<=0){toast('请填写正确的转账对象及金额');return}
-          queueOperation('转账给'+target,'{转账|'+amount.toFixed(2)+'|'+(val('.gc-tf-note')||'转给'+target)+'}');
-        }else if(view?.classList.contains('gc-view-location')){
-          const name=val('.gc-loc-name');if(!name){toast('请填写地点名称');return}
-          queueOperation('位置','{位置|'+name+'|'+val('.gc-loc-addr')+'}');
-        }else if(view?.classList.contains('gc-view-image')){
-          const url=val('.gc-img-url');if(!url||!resolveImage(url)){toast('请填写有效的图片地址');return}
-          queueOperation('图片','{图片|'+url+'|'+val('.gc-img-desc')+'}');
-        }else if(view?.classList.contains('gc-view-voice')){
-          const voice=val('.gc-vc-text');if(!voice){toast('请填写语音文字');return}
-          queueOperation('语音','{语音|'+Math.max(1,Math.round(voice.length*.4))+'|'+voice+'}');
-        }
-        view?.querySelectorAll('input').forEach(x=>{x.value=''});return;
-      }
-      if(el.closest('.gc-send-btn')){sendMessage();return}
-      const red=el.closest('.gc-redpacket-card');if(red){
-        const id=red.dataset.rpKey,detail=red.parentElement.querySelector('.gc-rp-detail');
-        if(red.dataset.rpSender==='self'||data.received[id]){
-          if(detail){detail.style.display=detail.style.display==='none'?'block':'none';detail.classList.toggle('show',detail.style.display!=='none')}return;
-        }
-        const amount=Number(red.dataset.rpTotal||0),count=Number(red.dataset.rpCount||1);
-        const cents=Math.max(1,Math.round(Math.max(.01,amount/Math.max(1,count))*100));
-        const share=(cents/100).toFixed(2);data.received[id]=share;
-        red.classList.add('opened');red.querySelector('.gc-rp-state').textContent='你已领取 ¥'+share;
-        if(detail){detail.textContent='你已领取 ¥'+share+' · 本地模拟记录';detail.style.display='block';detail.classList.add('show')}
-        persistInteraction();return;
-      }
-      const transfer=el.closest('.gc-transfer-card');if(transfer){
-        const id=transfer.dataset.transferKey;if(transfer.dataset.transferSender==='self'||data.transfers[id])return;
-        data.transfers[id]=true;transfer.classList.add('collected');transfer.querySelector('.gc-transfer-note').textContent='已收款 · 本地模拟';persistInteraction();return;
-      }
-      const voice=el.closest('.gc-type-voice');if(voice){
-        const transcript=voice.querySelector('.gc-voice-trans');
-        if(transcript){const show=transcript.style.display==='none';transcript.style.display=show?'block':'none';voice.classList.toggle('playing',show);voice.querySelector('.gc-voice-play').textContent=show?'❚❚':'▶'}return;
-      }
-      const imageEl=el.closest('.gc-image-card img');if(imageEl){const url=imageEl.getAttribute('src');if(url&&/^https?:\/\//.test(url))window.open(url,'_blank','noopener,noreferrer');return}
-    });
-    showQueue();
   }
 
   function enhanceRegexPanel1105(){
@@ -1622,7 +1628,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       <div class="violet-regex-toolbar"><button class="button secondary" data-action="violet-regex-import">导入正则 JSON</button><button class="button secondary" data-action="violet-regex-new">＋ 新建正则</button><button class="button secondary" data-action="violet-regex-export">导出正则 JSON</button><button class="button secondary" data-action="violet-regex-preview">预览效果</button></div>
       <input id="violetRegexImportFile" type="file" accept=".json,application/json" hidden>
       ${rules.length?rules.map(r=>`<div class="violet-regex-rule"><div class="violet-regex-rule-info"><strong>${esc(r.name)}</strong><br><small>${r.scope==='selected'?`指定番外 · ${(r.storyIds||[]).length} 篇`:'全部番外'} · ${r.enabled===false?'已停用':'已启用'}</small></div><div class="violet-regex-actions"><button data-action="violet-regex-toggle" data-id="${esc(r.id)}">${r.enabled===false?'启用':'停用'}</button><button data-action="violet-regex-edit" data-id="${esc(r.id)}">编辑</button><button data-action="violet-regex-delete" data-id="${esc(r.id)}">删除</button></div></div>`).join(''):'<p class="muted">还没有美化规则。可以导入已有正则 JSON，或者新建一条。</p>'}
-      <p class="muted">支持 $1、$2、$3、$&、{{match}}。普通规则匹配阅读后文本；大型 HTML/CSS 模板从原始番外匹配，独立渲染。已适配糖果色群聊的本地操作，导入脚本不会直接执行。每条规则可以停用、编辑或删除。</p>`;
+      <p class="muted">支持 $1、$2、$3、$&、{{match}}。普通规则匹配阅读后文本；大型 HTML/CSS 模板从原始番外匹配，独立渲染。复杂 HTML/CSS/JavaScript 模板在独立隔离窗口内运行；支持基本本地互动记录与 /send 模拟，不连接 AI。每条规则可以停用、编辑或删除。</p>`;
     parent.appendChild(panel);
     bindActionButtons(panel);
     panel.querySelector('#violetRegexImportFile').addEventListener('change',handleRegexImport1105);
@@ -1688,7 +1694,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       <h3>正则美化预览</h3><label>预览番外<select id="violetPreviewStory">${state.stories.map(s=>`<option value="${esc(s.id)}" ${s.id===st.id?'selected':''}>${esc(s.title)}</option>`).join('')}</select></label>
       <p id="violetPreviewCount" class="muted"></p>
       <div class="violet-preview-area reader-body" id="violetRegexPreviewBody"></div>
-      <p class="muted">仅在预览窗口展示，不修改原稿；交互预览不写入本地记录。大型模板支持跨行匹配原始番外，未适配的酒馆脚本不会运行。</p>
+      <p class="muted">仅在预览窗口展示，不修改原稿；交互预览不写入本地记录。大型模板可跨行匹配原始番外；交互在隔离窗口内预览，不写入本地记录，也不会连接 AI。</p>
       <div class="violet-extra-actions"><button type="button" data-violet-cancel>关闭</button></div>`);
     const select=dlg.querySelector('#violetPreviewStory'),body=dlg.querySelector('#violetRegexPreviewBody');
     const doPreview=()=>{
@@ -1711,9 +1717,9 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(name==='violet-regex-delete'&&r){
       if(confirm(`确定永久删除美化正则「${r.name}」吗？\n仅删除此规则，不影响任何番外原稿。`)){
         if(saveRules1105(rules.filter(x=>x.id!==id),'美化正则已删除')){
-          try{const stored=getChatStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
+          try{const stored=getRichStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
             Object.keys(stored).filter(k=>k.includes('__'+safeId+'__')).forEach(k=>delete stored[k]);
-            localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));}catch(err){console.warn('清理已删除正则的互动记录失败：',err)}
+            localStorage.setItem(RICH_STORE_KEY_1105,JSON.stringify(stored));}catch(err){console.warn('清理已删除规则的互动记录失败：',err)}
         }
       }return
     }
@@ -1779,9 +1785,9 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       const existed=(state.stories||[]).some(st=>st.id===id);
       const outcome=originalAction1105(name,id,button);
       if(existed&&!(state.stories||[]).some(st=>st.id===id)){
-        try{const stored=getChatStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
+        try{const stored=getRichStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
           Object.keys(stored).filter(k=>k.startsWith(safeId+'__')).forEach(k=>delete stored[k]);
-          localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));}catch(error){console.warn('清理已删除番外的互动记录失败：',error)}
+          localStorage.setItem(RICH_STORE_KEY_1105,JSON.stringify(stored));}catch(error){console.warn('清理已删除番外的互动记录失败：',error)}
       }
       return outcome;
     }
@@ -1792,8 +1798,8 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     const before=state;
     await originalClearData1105();
     if(before!==state){
-      try{localStorage.removeItem(CHAT_STORAGE_1105)}
-      catch(error){console.warn('独立群聊互动记录清理失败：',error);toast('收藏已清空，但群聊互动记录清理失败，请检查浏览器存储。')}
+      try{localStorage.removeItem(RICH_STORE_KEY_1105)}
+      catch(error){console.warn('独立美化互动记录清理失败：',error);toast('收藏已清空，但美化互动记录清理失败，请检查浏览器存储。')}
     }
   };
   // The original startup has already run above; refresh once so added controls show.
