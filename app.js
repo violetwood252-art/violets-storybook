@@ -930,7 +930,9 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
  * Violet's Storybook 1105 — additive enhancements, 2026-11-05
  * The original 1105 lines above are preserved verbatim. No original renderer,
  * CSS theme, player, story source or persistence key has been replaced.
- * Features: character deletion, avatars, display-only regex, series accordion.
+ * Features: character deletion, avatars, scoped regex, series accordion.
+ * Additional compatible features: series avatars, complex GC local interaction,
+ * regex deletion, theme & music list accordions.
  * ========================================================================== */
 (function violet1105Enhancements(){
   'use strict';
@@ -939,6 +941,8 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   const originalOpenReader1105=openReader;
   const originalAction1105=action;
   const expandedSeries1105=new Set();
+  let themesListOpen1105=false;
+  let musicListOpen1105=false;
 
   function ensureRules1105(){
     if(!Array.isArray(state.regexRules))state.regexRules=[];
@@ -955,6 +959,13 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       #pageContent .violet-series-toggle{flex-shrink:0;min-width:35px;min-height:35px;padding:3px 8px;cursor:pointer}
       #pageContent .violet-avatar-image{display:block;width:100%;height:100%;object-fit:cover;border-radius:inherit}
       #pageContent .violet-avatar-action{font:inherit;cursor:pointer;max-width:100%}
+      #pageContent .violet-section-fold{width:100%;display:flex;align-items:center;justify-content:space-between;text-align:left;gap:10px;font:inherit;font-weight:700;cursor:pointer;min-height:40px}
+      #pageContent .violet-section-fold .violet-chevron{flex-shrink:0;font-size:1.05em}
+      #pageContent .violet-folded-list[hidden]{display:none!important}
+      #pageContent .violet-series-avatar-action{flex-shrink:0}
+      .violet-rich-widget{overflow:visible;max-width:100%}
+      @media(max-width:600px){.violet-rich-widget{width:100%;min-width:0}}
+      #pageContent .violet-avatar-action:focus-visible,#pageContent .violet-section-fold:focus-visible{outline:2px solid currentColor;outline-offset:2px}
       #pageContent .violet-role-actions{display:flex;flex-wrap:wrap;align-items:center;gap:7px}
       #pageContent .violet-regex-panel{margin-top:18px;min-width:0}
       #pageContent .violet-regex-rule{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:12px 0;border-bottom:1px dashed currentColor}
@@ -1084,11 +1095,71 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     });
   }
 
+  function findSeries1105(id){return (state.series||[]).find(s=>s.id===id)}
+  function getSeriesAvatar1105(series){
+    if(series?.avatarStoryId){
+      const story=(state.stories||[]).find(st=>st.id===series.avatarStoryId);
+      return story?safeImageSource(story.coverUrl||story.cover||''):'';
+    }
+    return safeImageSource(series?.avatar||'');
+  }
+  function openSeriesAvatar1105(id){
+    const series=findSeries1105(id);if(!series)return;
+    const candidates=(state.stories||[]).filter(st=>safeImageSource(st.coverUrl||st.cover||''));
+    const sorted=[...candidates].sort((a,b)=>Number(b.seriesId===id)-Number(a.seriesId===id));
+    const avatar=getSeriesAvatar1105(series);
+    const mode=series.avatarStoryId?'story':series.avatar?'upload':'none';
+    const dlg=showDialog1105('violetSeriesAvatarDialog',`
+      <h3>设置故事系列头像 · ${esc(series.name)}</h3>
+      <p class="muted">可上传头像，也可以选用一篇番外的封面。本系列番外优先显示；封面发生变化后，系列头像会同步更新。</p>
+      <div id="violetSeriesAvatarPreview">${avatar?`<img class="violet-avatar-preview" src="${esc(avatar)}" alt="当前头像">`:'默认系列图标 ❖'}</div>
+      <form id="violetSeriesAvatarForm">
+        <label><input type="radio" name="avatarMode" value="none" ${mode==='none'?'checked':''}> 使用原版默认系列图标</label>
+        <label><input type="radio" name="avatarMode" value="upload" ${mode==='upload'?'checked':''}> 上传本地头像</label>
+        <input type="file" name="avatarFile" accept="image/png,image/jpeg,image/webp,image/gif,image/avif">
+        <label><input type="radio" name="avatarMode" value="story" ${mode==='story'?'checked':''}> 选用已有番外封面</label>
+        <select name="avatarStory"><option value="">请选择有封面的番外…</option>${sorted.map(st=>`<option value="${esc(st.id)}" ${series.avatarStoryId===st.id?'selected':''}>${esc(st.title)}${st.seriesId===id?' · 本系列':''}</option>`).join('')}</select>
+        ${!candidates.length?'<p class="muted">暂无可选的番外封面。</p>':''}
+        <div class="violet-extra-actions"><button type="button" data-violet-cancel>取消</button><button type="submit" class="button primary">保存系列头像</button></div>
+      </form>`);
+    const form=dlg.querySelector('form');
+    form.elements.avatarFile.addEventListener('change',()=>{if(form.elements.avatarFile.files.length)form.querySelector('[value="upload"]').checked=true});
+    form.elements.avatarStory.addEventListener('change',()=>{if(form.elements.avatarStory.value)form.querySelector('[value="story"]').checked=true});
+    form.addEventListener('submit',async e=>{
+      e.preventDefault();const selected=form.querySelector('[name="avatarMode"]:checked')?.value;
+      const oldAvatar=series.avatar,oldStoryId=series.avatarStoryId;
+      let nextAvatar='',nextStoryId='';
+      if(selected==='story'){
+        nextStoryId=form.elements.avatarStory.value;
+        if(!candidates.some(st=>st.id===nextStoryId)){toast('请选择一篇有封面的番外');return}
+      }else if(selected==='upload'){
+        const file=form.elements.avatarFile.files?.[0];
+        if(file){
+          if(!/^image\/(?:png|jpeg|webp|gif|avif)$/.test(file.type)||file.size>15*1024*1024){toast('请使用 15MB 以下的 PNG、JPG、WebP、GIF 或 AVIF 图片');return}
+          try{nextAvatar=await imageFileToDataURL(file,480,.82)}catch(err){toast(err.message||'图片处理失败');return}
+        }else if(series.avatar&&!series.avatarStoryId)nextAvatar=series.avatar;
+        else{toast('请先选择本地图片');return}
+      }
+      series.avatar=nextAvatar;series.avatarStoryId=nextStoryId;
+      if(!persist(null)){series.avatar=oldAvatar;series.avatarStoryId=oldStoryId;return}
+      dlg.close();toast('故事系列头像已保存');render();
+    });
+  }
   function enhanceSeries1105(){
     document.querySelectorAll('#pageContent [data-action="edit-series"]').forEach(button=>{
       const row=button.closest('.list-row');const panel=row?.parentElement;
       if(!row||!panel)return;
       const id=button.dataset.id;
+      const series=findSeries1105(id);
+      const avatar=getSeriesAvatar1105(series);
+      const icon=row.querySelector('.list-icon');
+      if(icon&&avatar){
+        icon.textContent='';const img=document.createElement('img');img.className='violet-avatar-image';
+        img.alt=(series?.name||'系列')+'头像';img.src=avatar;img.onerror=()=>{icon.textContent='❖'};icon.appendChild(img);
+      }
+      const avatarButton=document.createElement('button');avatarButton.type='button';avatarButton.className='violet-series-avatar-action';
+      avatarButton.dataset.action='violet-series-avatar';avatarButton.dataset.id=id;avatarButton.textContent='头像';
+      row.insertBefore(avatarButton,button);
       const info=row.querySelector('.list-main');const title=info?.querySelector('strong');
       if(!title)return;
       const toggle=document.createElement('button');toggle.type='button';toggle.className='violet-series-title';
@@ -1122,7 +1193,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   // story.body, story.raw, the Markdown parser, HTML sanitizer or CSS engine.
   function compileRegex1105(input,optionalFlags=''){
     const value=String(input||'').trim();
-    if(!value||value.length>600)throw new Error('正则表达式不能为空，且不能超过 600 个字符。');
+    if(!value||value.length>1200)throw new Error('正则表达式不能为空，且不能超过 1200 个字符。');
     let source=value,flags=String(optionalFlags||'').trim();
     const delimited=value.match(/^\/([\s\S]*)\/([dgimsuvy]*)$/);
     if(delimited){source=delimited[1];flags=delimited[2]}
@@ -1145,7 +1216,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(input instanceof RegExp)input=input.toString();
     if(typeof input!=='string')throw new Error('第 '+(index+1)+' 条正则缺少 findRegex/pattern。');
     const replacement=raw.replaceString??raw.replacement??raw.replace??'';
-    if(typeof replacement!=='string'||replacement.length>50000)throw new Error('第 '+(index+1)+' 条替换模板格式错误或过长。');
+    if(typeof replacement!=='string'||replacement.length>400000)throw new Error('第 '+(index+1)+' 条替换模板格式错误或过长。');
     compileRegex1105(input,raw.flags||'');
     const scope=raw.scope==='selected'?'selected':raw.scope==='all'?'all':Array.isArray(raw.storyIds)?'selected':'all';
     const storyIds=Array.isArray(raw.storyIds)?raw.storyIds.filter(id=>typeof id==='string'):[];
@@ -1218,10 +1289,277 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     const rules=customRules||ensureRules1105();
     let count=0;
     for(const rule of rules){
-      if(!ruleApplies1105(rule,storyId))continue;
+      if(!ruleApplies1105(rule,storyId)||richRule1105(rule))continue;
       count+=applySingleRule1105(container,rule);
     }
     return count;
+  }
+
+  /* Rich SillyTavern-style regex compatibility: separate from the 1105 renderer.
+     Imported scripts never run. A scoped Shadow DOM displays the authored HTML/CSS,
+     while a locally implemented adapter handles supported GC chat controls. */
+  const CHAT_STORAGE_1105=KEY+'-rich-chat-v1';
+  const MAX_RICH_MATCHES_1105=25;
+  function richRule1105(rule){
+    const replacement=String(rule?.replaceString||'');
+    return /<style\b|<script\b|class\s*=\s*["'][^"']*(?:gc-wrapper|chat|phone|status)/i.test(replacement);
+  }
+  function getChatStore1105(){
+    try{const data=JSON.parse(localStorage.getItem(CHAT_STORAGE_1105)||'{}');return data&&typeof data==='object'&&!Array.isArray(data)?data:{}}
+    catch{return {}}
+  }
+  function getChatData1105(key){
+    const data=getChatStore1105()[key];
+    return data&&typeof data==='object'?{
+      posts:Array.isArray(data.posts)?data.posts.slice(-80):[],
+      received:data.received&&typeof data.received==='object'?data.received:{},
+      transfers:data.transfers&&typeof data.transfers==='object'?data.transfers:{}
+    }:{posts:[],received:{},transfers:{}};
+  }
+  function saveChatData1105(key,data){
+    try{
+      const stored=getChatStore1105();stored[key]={posts:data.posts.slice(-80),received:data.received,transfers:data.transfers};
+      const keys=Object.keys(stored);if(keys.length>120)keys.slice(0,keys.length-120).forEach(k=>delete stored[k]);
+      localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));return true;
+    }catch(error){console.warn('独立群聊记录未能保存到本机：',error);toast('互动已显示，但本地存储空间不足，刷新后可能丢失。');return false}
+  }
+  function isSafeCss1105(text){
+    return String(text||'').replace(/@import\s+(?:url\([^;]*\)|[^;]*);?/gi,'')
+      .replace(/url\s*\([^)]*\)/gi,'none')
+      .replace(/expression\s*\(/gi,'blocked(')
+      .replace(/:root\b/g,':host');
+  }
+  function sanitizeRichMarkup1105(markup){
+    const doc=new DOMParser().parseFromString(String(markup||''),'text/html');
+    doc.querySelectorAll('script,style,iframe,object,embed,base,link,meta,template,svg,math,foreignObject').forEach(n=>n.remove());
+    doc.body.querySelectorAll('*').forEach(el=>{
+      [...el.attributes].forEach(attr=>{
+        const name=attr.name.toLowerCase(),value=attr.value||'',trimmed=value.trim();
+        if(name.startsWith('on')||name==='srcdoc'||name==='formaction'||name==='action'||name==='target'){el.removeAttribute(attr.name);return}
+        if(['href','src','poster','xlink:href'].includes(name)){
+          if(!/^(?:https?:\/\/|data:image\/(?:png|jpe?g|gif|webp|avif);base64,|#)/i.test(trimmed))el.removeAttribute(attr.name);
+          return;
+        }
+        if(name==='srcset'){el.removeAttribute(attr.name);return}
+        if(name==='style'&&/(?:expression\s*\(|javascript\s*:|vbscript\s*:|behavior\s*:|url\s*\(|position\s*:\s*fixed)/i.test(value))el.removeAttribute(attr.name);
+      });
+      if(el.tagName==='A')el.setAttribute('rel','noopener noreferrer');
+    });
+    return doc.body;
+  }
+  function cleanRichTemplate1105(template){
+    let value=String(template||'').trim();
+    value=value.replace(/^```(?:html)?\s*\n?/i,'').replace(/\n?```\s*$/,'').replace(/<\/html\s*>\s*$/i,'');
+    const styles=[];
+    value=value.replace(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi,(_,css)=>{styles.push(isSafeCss1105(css));return ''});
+    value=value.replace(/<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,'');
+    return {html:value,styles:styles.join('\n')};
+  }
+  function extractRichReplacements1105(story,rules){
+    let source=String(story.body??'');const widgets=[];
+    if(source.length>3000000)return {source,widgets};
+    for(const rule of rules){
+      if(!ruleApplies1105(rule,story.id)||!richRule1105(rule))continue;
+      let re;try{re=compileRegex1105(rule.findRegex,rule.flags)}catch(err){console.warn('复杂美化正则跳过：',err);continue}
+      let currentCount=0;
+      source=source.replace(re,(match,...args)=>{
+        if(widgets.length>=MAX_RICH_MATCHES_1105||currentCount>=MAX_RICH_MATCHES_1105)return match;
+        const offsetIndex=args.length>=2&&typeof args[args.length-1]==='object'?args.length-3:args.length-2;
+        const captures=args.slice(0,offsetIndex);
+        const groups=typeof args[args.length-1]==='object'?args[args.length-1]:undefined;
+        const unique=widgets.length;
+        const marker=`VIOLETRICHWIDGET${unique}END`;
+        const key=[story.id,rule.id,unique].map(x=>String(x).replace(/[^a-zA-Z0-9_-]/g,'_')).join('__');
+        widgets.push({marker,key,ruleName:rule.name,html:templateReplacement1105(rule.replaceString,match,captures,groups)});
+        currentCount++;
+        return '\n\n'+marker+'\n\n';
+      });
+    }
+    return {source,widgets};
+  }
+  function replaceRichMarkers1105(container,widgets,preview=false){
+    if(!widgets.length)return;
+    const doc=container.ownerDocument;
+    const markerMap=new Map(widgets.map(w=>[w.marker,w]));
+    const walker=doc.createTreeWalker(container,NodeFilter.SHOW_TEXT);
+    const pending=[];let node;
+    while((node=walker.nextNode())){
+      if(!node.nodeValue||!node.nodeValue.includes('VIOLETRICHWIDGET'))continue;
+      pending.push(node);
+    }
+    for(const textNode of pending){
+      if(!textNode.parentNode)continue;
+      const text=textNode.nodeValue;
+      const matcher=/VIOLETRICHWIDGET\d+END/g;
+      let match,index=0;const fragment=doc.createDocumentFragment();
+      while((match=matcher.exec(text))){
+        fragment.appendChild(doc.createTextNode(text.slice(index,match.index)));
+        const widget=markerMap.get(match[0]);
+        if(widget)fragment.appendChild(buildRichWidget1105(doc,widget,preview));
+        else fragment.appendChild(doc.createTextNode(match[0]));
+        index=matcher.lastIndex;
+      }
+      if(!index)continue;
+      fragment.appendChild(doc.createTextNode(text.slice(index)));
+      const parent=textNode.parentElement;
+      if(parent&&parent.tagName==='P'&&parent.textContent.trim()===text.trim()&&/^\s*VIOLETRICHWIDGET\d+END\s*$/.test(text))parent.replaceWith(fragment);
+      else textNode.replaceWith(fragment);
+    }
+  }
+  function buildRichWidget1105(doc,widget,preview=false){
+    const host=doc.createElement('div');host.className='violet-rich-widget';host.dataset.violetRegexSkip='1';
+    host.style.cssText='display:block;max-width:100%;min-width:0;margin:16px auto;contain:layout style;';
+    const root=host.attachShadow({mode:'open'});
+    const cleaned=cleanRichTemplate1105(widget.html);
+    const style=doc.createElement('style');
+    style.textContent=`:host{display:block;max-width:100%;min-width:0;color:#595959;font-family:system-ui,sans-serif}:host *, :host *::before, :host *::after{box-sizing:border-box}img{max-width:100%}button,input{font:inherit} ${cleaned.styles}`;
+    root.appendChild(style);
+    const safeBody=sanitizeRichMarkup1105(cleaned.html);
+    while(safeBody.firstChild)root.appendChild(doc.importNode(safeBody.firstChild,true)),safeBody.removeChild(safeBody.firstChild);
+    const wrappers=root.querySelectorAll('.gc-wrapper');
+    wrappers.forEach((wrapper,idx)=>initGcChat1105(root,wrapper,widget.key+'__'+idx,preview));
+    if(!wrappers.length){
+      // Even non-chat templates retain their visual CSS; imported JS is never executed.
+      root.querySelectorAll('form').forEach(form=>form.addEventListener('submit',e=>e.preventDefault()));
+    }
+    return host;
+  }
+  function initGcChat1105(root,wrapper,key,preview){
+    const chatBox=wrapper.querySelector('.js-gc-chat-box'),raw=wrapper.querySelector('.js-gc-raw');
+    if(!chatBox||!raw)return;
+    const group=wrapper.querySelector('.gc-group-name')?.textContent?.trim()||'群聊';
+    const data=preview?{posts:[],received:{},transfers:{}}:getChatData1105(key);
+    const queued=[];let messageIndex=0;
+    const resolveImage=(input)=>{
+      let val=String(input||'').trim();
+      if(!val||val==='none'||val==='null')return '';
+      if(!/^https?:\/\//i.test(val))val='https://image.uglycat.cc/'+val;
+      return safeImageSource(val);
+    };
+    const avatarHtml=(name,avatar)=>{
+      const src=resolveImage(avatar);
+      if(src)return `<img class="gc-avatar" alt="头像" src="${esc(src)}">`;
+      const palette=['#ff8ba7','#8ac6d1','#c5a3ff','#ffb38a','#a3e4d7','#f9e79f','#f1948a','#85c1e9'];
+      let hash=0;for(const ch of String(name))hash=(hash*31+ch.charCodeAt(0))|0;
+      return `<div class="gc-avatar gc-avatar-text" style="background:${palette[Math.abs(hash)%palette.length]}">${esc(Array.from(name)[0]||'?')}</div>`;
+    };
+    const formatTime=()=>new Date().toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',hour12:false});
+    const bubble=(line,isSelf,recordKey)=>{
+      const text=String(line||'').trim();let m;
+      if((m=text.match(/\{红包\|([\d.]+)\|(\d+)(?:\|([^|{}]*))?(?:\|([^|{}]*))?\}/))){
+        const total=Number(m[1]),count=Number(m[2]),bless=m[3]||'恭喜发财，大吉大利';
+        const claimed=!!data.received[recordKey],records=(m[4]||'').split(';').filter(Boolean);
+        const opened=claimed||records.length>=count;
+        return `<div class="gc-special-bubble gc-type-redpacket"><div class="gc-bubble-label">红包</div><div class="gc-redpacket-card ${opened?'opened':''}" data-rp-key="${esc(recordKey)}" data-rp-total="${esc(String(total))}" data-rp-count="${esc(String(count))}" data-rp-sender="${isSelf?'self':'other'}"><div class="gc-rp-top"><div class="gc-rp-coin">¥</div><div class="gc-rp-info"><div class="gc-rp-bless">${esc(bless)}</div><div class="gc-rp-state">${isSelf?'你发出的红包':claimed?'已领取':opened?'已被抢完':'点击拆红包'}</div></div></div><div class="gc-rp-bottom"><span>拼手气红包</span><span>${records.length+(claimed?1:0)}/${count}</span></div></div><div class="gc-rp-detail ${claimed?'show':''}" style="${claimed?'':'display:none'}">${claimed?'你已领取 ¥'+esc(String(data.received[recordKey])):'点击红包查看领取状态'}</div></div>`;
+      }
+      if((m=text.match(/\{转账\|([^|{}]+?)(?:\|([^|{}]*))?\}/))){
+        const collected=!!data.transfers[recordKey];
+        return `<div class="gc-special-bubble gc-type-transfer"><div class="gc-bubble-label">转账</div><div class="gc-transfer-card ${collected?'collected':isSelf?'own':''}" data-transfer-key="${esc(recordKey)}" data-transfer-sender="${isSelf?'self':'other'}"><div class="gc-transfer-icon">¥</div><div class="gc-transfer-detail"><div class="gc-transfer-amount">¥${esc(m[1])}</div><div class="gc-transfer-note">${collected?'已收款':esc(m[2]|| (isSelf?'已转出':'点击收款'))}</div></div><div class="gc-transfer-brand">群聊转账</div></div></div>`;
+      }
+      if((m=text.match(/\{位置\|([^|{}]+?)(?:\|([^|{}]*))?\}/)))return `<div class="gc-special-bubble gc-type-location"><div class="gc-bubble-label">位置</div><div class="gc-location-card"><div class="gc-location-map">📍</div><div class="gc-location-info"><div class="gc-location-name">${esc(m[1])}</div><div class="gc-location-addr">${esc(m[2]||'共享位置')}</div></div></div></div>`;
+      if((m=text.match(/\{图片\|([^|{}]+?)(?:\|([^|{}]*))?\}/))){const src=resolveImage(m[1]);return `<div class="gc-special-bubble gc-type-image"><div class="gc-bubble-label">图片</div><div class="gc-image-card">${src?`<img src="${esc(src)}" alt="${esc(m[2]||'图片')}" loading="lazy">`:''}<div class="gc-image-desc">${esc(m[2]||'')}</div></div></div>`}
+      if((m=text.match(/\{语音\|(\d+)\|([^|{}]+?)\}/)))return `<div class="gc-special-bubble gc-type-voice" data-duration="${esc(m[1])}"><div class="gc-bubble-label">语音</div><div class="gc-voice-main"><span class="gc-voice-play">▶</span><div class="gc-voice-bars">${Array.from({length:12},(_,i)=>`<span class="gc-vbar" style="height:${7+(i*7%14)}px"></span>`).join('')}</div><span class="gc-voice-dur">${esc(m[1])}″</span></div><div class="gc-voice-hint">点击查看语音文字与模拟播放</div><div class="gc-voice-trans" style="display:none">${esc(m[2])}</div></div>`;
+      const bareImage=text.match(/^(?:\{表情\|)?([a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp))\}?$/i);
+      if(bareImage){const src=resolveImage(bareImage[1]);return src?`<div class="gc-sticker-bubble"><img class="gc-sticker-img" alt="表情" src="${esc(src)}" loading="lazy"></div>`:''}
+      // A single line may mix normal text with image filenames; preserve the
+      // original GC template's inline-sticker behavior without executing HTML.
+      const chunks=text.split(/([a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp))/gi);
+      return chunks.filter(chunk=>chunk.trim()).map(chunk=>{
+        if(/^[a-zA-Z0-9_-]+\.(?:png|jpg|jpeg|gif|webp)$/i.test(chunk)){
+          const url=resolveImage(chunk);
+          return url?`<div class="gc-sticker-bubble"><img class="gc-sticker-img" alt="表情" src="${esc(url)}" loading="lazy"></div>`:'';
+        }
+        return `<div class="gc-msg-bubble">${esc(chunk).replace(/@([\p{L}\p{N}_-]+)/gu,'<span class="gc-at-tag">@$1</span>')}</div>`;
+      }).join('');
+    };
+    const addMessage=(sender,time,avatar,content,isSelf,recordPrefix)=>{
+      const row=document.createElement('div');row.className='gc-msg-row '+(isSelf?'right':'left');
+      const lines=String(content||'').split(/\n/).map(s=>s.trim()).filter(Boolean);
+      row.innerHTML=avatarHtml(sender,avatar)+`<div class="gc-msg-content"><div class="gc-msg-name">${isSelf?`<span>${esc(time)}</span> ${esc(sender)}`:`${esc(sender)} <span>${esc(time)}</span>`}</div>${lines.map((line,i)=>bubble(line,isSelf,recordPrefix+'_'+i)).join('')}</div>`;
+      chatBox.appendChild(row);chatBox.scrollTop=chatBox.scrollHeight;return row;
+    };
+    const matches=[...raw.textContent.trim().matchAll(/\[([^\]|]*)\|([^\]|]*)\|([^\]|]*)\]([\s\S]*?)(?=\n\s*\[|$)/g)];
+    matches.forEach((m,i)=>{
+      const sender=m[1].trim(),isSelf=sender==='{{user}}'||sender==='我';
+      addMessage(isSelf?'我':sender,m[2].trim(),m[3].trim(),m[4],isSelf,'original_'+i);
+    });
+    data.posts.forEach((post,i)=>{if(post&&typeof post.text==='string')addMessage('我',String(post.time||''),'',post.text,true,'post_'+i)});
+    const queueBar=wrapper.querySelector('.gc-queue-bar'),queueText=wrapper.querySelector('.gc-queue-text');
+    const closePanel=()=>{wrapper.querySelector('.gc-panel')?.classList.remove('active');wrapper.querySelector('.gc-add-btn')?.classList.remove('open')};
+    const showQueue=()=>{
+      if(!queueBar)return;queueBar.style.display=queued.length?'flex':'none';
+      if(queueText)queueText.textContent=queued.length+' 项操作待发送：'+queued.map(x=>x.label).join(' / ');
+    };
+    const queueOperation=(label,text)=>{queued.push({label,text});showQueue();closePanel()};
+    const persistInteraction=()=>{if(!preview)saveChatData1105(key,data)};
+    const sendMessage=()=>{
+      const input=wrapper.querySelector('.gc-chat-input'),value=input?.value?.trim()||'';
+      if(!value&&!queued.length){if(input)input.placeholder='请输入内容或先添加操作…';return}
+      const content=[...queued.map(x=>x.text),value].filter(Boolean).join('\n');
+      const index=data.posts.length;data.posts.push({text:content,time:formatTime()});
+      if(data.posts.length>80)data.posts.shift();
+      addMessage('我',formatTime(),'',content,true,'post_'+index);
+      queued.length=0;showQueue();if(input)input.value='';persistInteraction();
+    };
+    wrapper.addEventListener('submit',e=>e.preventDefault());
+    wrapper.addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.matches('.gc-chat-input')){e.preventDefault();sendMessage()}});
+    wrapper.addEventListener('click',event=>{
+      const el=event.target instanceof Element?event.target:null;if(!el)return;
+      if(el.closest('.gc-add-btn')){wrapper.querySelector('.gc-panel')?.classList.toggle('active');el.closest('.gc-add-btn').classList.toggle('open');return}
+      if(el.closest('.gc-panel-close')){closePanel();return}
+      const tab=el.closest('.gc-panel-tab');if(tab){
+        const classes=['sticker','redpacket','transfer','location','image','voice'];
+        const selected=classes[[...tab.parentNode.children].indexOf(tab)];
+        wrapper.querySelectorAll('.gc-panel-tab').forEach(x=>x.classList.toggle('active',x===tab));
+        wrapper.querySelectorAll('.gc-panel-view').forEach(x=>x.classList.toggle('active',x.classList.contains('gc-view-'+selected)));return;
+      }
+      const sticker=el.closest('.gc-sticker-item');if(sticker){const input=wrapper.querySelector('.gc-chat-input');if(input){const name=(sticker.getAttribute('src')||'').split('/').pop();input.value=input.value?input.value+'\n'+name:name;input.focus()}closePanel();return}
+      if(el.closest('.gc-queue-clear')){queued.length=0;showQueue();return}
+      const confirm=el.closest('.gc-panel-confirm');if(confirm){
+        const view=confirm.closest('.gc-panel-view');
+        const val=cls=>view?.querySelector(cls)?.value?.trim()||'';
+        if(view?.classList.contains('gc-view-redpacket')){
+          const amount=Number(val('.gc-rp-amount')),count=Number(val('.gc-rp-count'));if(!Number.isFinite(amount)||amount<=0||!Number.isInteger(count)||count<1||amount<count*.01){toast('红包金额或份数不正确');return}
+          queueOperation('红包','{红包|'+amount.toFixed(2)+'|'+count+'|'+(val('.gc-rp-bless-input')||'恭喜发财，大吉大利')+'}');
+        }else if(view?.classList.contains('gc-view-transfer')){
+          const target=val('.gc-tf-target'),amount=Number(val('.gc-tf-amount'));if(!target||!Number.isFinite(amount)||amount<=0){toast('请填写正确的转账对象及金额');return}
+          queueOperation('转账给'+target,'{转账|'+amount.toFixed(2)+'|'+(val('.gc-tf-note')||'转给'+target)+'}');
+        }else if(view?.classList.contains('gc-view-location')){
+          const name=val('.gc-loc-name');if(!name){toast('请填写地点名称');return}
+          queueOperation('位置','{位置|'+name+'|'+val('.gc-loc-addr')+'}');
+        }else if(view?.classList.contains('gc-view-image')){
+          const url=val('.gc-img-url');if(!url||!resolveImage(url)){toast('请填写有效的图片地址');return}
+          queueOperation('图片','{图片|'+url+'|'+val('.gc-img-desc')+'}');
+        }else if(view?.classList.contains('gc-view-voice')){
+          const voice=val('.gc-vc-text');if(!voice){toast('请填写语音文字');return}
+          queueOperation('语音','{语音|'+Math.max(1,Math.round(voice.length*.4))+'|'+voice+'}');
+        }
+        view?.querySelectorAll('input').forEach(x=>{x.value=''});return;
+      }
+      if(el.closest('.gc-send-btn')){sendMessage();return}
+      const red=el.closest('.gc-redpacket-card');if(red){
+        const id=red.dataset.rpKey,detail=red.parentElement.querySelector('.gc-rp-detail');
+        if(red.dataset.rpSender==='self'||data.received[id]){
+          if(detail){detail.style.display=detail.style.display==='none'?'block':'none';detail.classList.toggle('show',detail.style.display!=='none')}return;
+        }
+        const amount=Number(red.dataset.rpTotal||0),count=Number(red.dataset.rpCount||1);
+        const cents=Math.max(1,Math.round(Math.max(.01,amount/Math.max(1,count))*100));
+        const share=(cents/100).toFixed(2);data.received[id]=share;
+        red.classList.add('opened');red.querySelector('.gc-rp-state').textContent='你已领取 ¥'+share;
+        if(detail){detail.textContent='你已领取 ¥'+share+' · 本地模拟记录';detail.style.display='block';detail.classList.add('show')}
+        persistInteraction();return;
+      }
+      const transfer=el.closest('.gc-transfer-card');if(transfer){
+        const id=transfer.dataset.transferKey;if(transfer.dataset.transferSender==='self'||data.transfers[id])return;
+        data.transfers[id]=true;transfer.classList.add('collected');transfer.querySelector('.gc-transfer-note').textContent='已收款 · 本地模拟';persistInteraction();return;
+      }
+      const voice=el.closest('.gc-type-voice');if(voice){
+        const transcript=voice.querySelector('.gc-voice-trans');
+        if(transcript){const show=transcript.style.display==='none';transcript.style.display=show?'block':'none';voice.classList.toggle('playing',show);voice.querySelector('.gc-voice-play').textContent=show?'❚❚':'▶'}return;
+      }
+      const imageEl=el.closest('.gc-image-card img');if(imageEl){const url=imageEl.getAttribute('src');if(url&&/^https?:\/\//.test(url))window.open(url,'_blank','noopener,noreferrer');return}
+    });
+    showQueue();
   }
 
   function enhanceRegexPanel1105(){
@@ -1233,7 +1571,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       <div class="violet-regex-toolbar"><button class="button secondary" data-action="violet-regex-import">导入正则 JSON</button><button class="button secondary" data-action="violet-regex-new">＋ 新建正则</button><button class="button secondary" data-action="violet-regex-export">导出正则 JSON</button><button class="button secondary" data-action="violet-regex-preview">预览效果</button></div>
       <input id="violetRegexImportFile" type="file" accept=".json,application/json" hidden>
       ${rules.length?rules.map(r=>`<div class="violet-regex-rule"><div class="violet-regex-rule-info"><strong>${esc(r.name)}</strong><br><small>${r.scope==='selected'?`指定番外 · ${(r.storyIds||[]).length} 篇`:'全部番外'} · ${r.enabled===false?'已停用':'已启用'}</small></div><div class="violet-regex-actions"><button data-action="violet-regex-toggle" data-id="${esc(r.id)}">${r.enabled===false?'启用':'停用'}</button><button data-action="violet-regex-edit" data-id="${esc(r.id)}">编辑</button><button data-action="violet-regex-delete" data-id="${esc(r.id)}">删除</button></div></div>`).join(''):'<p class="muted">还没有美化规则。可以导入已有正则 JSON，或者新建一条。</p>'}
-      <p class="muted">支持 $1、$2、$&、{{match}} 等替换占位符；正则只匹配阅读后可见的普通文本节点，跳过代码、链接、CSS 和 HTML 标签。复杂跨元素匹配暂不支持。请只导入信任的正则。</p>`;
+      <p class="muted">支持 $1、$2、$3、$&、{{match}}。普通规则匹配阅读后文本；大型 HTML/CSS 模板从原始番外匹配，独立渲染。已适配糖果色群聊的本地操作，导入脚本不会直接执行。每条规则可以停用、编辑或删除。</p>`;
     parent.appendChild(panel);
     bindActionButtons(panel);
     panel.querySelector('#violetRegexImportFile').addEventListener('change',handleRegexImport1105);
@@ -1282,7 +1620,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   async function handleRegexImport1105(e){
     const input=e.currentTarget,file=input.files?.[0];if(!file)return;
     try{
-      if(!/\.json$/i.test(file.name)||file.size>1024*1024)throw new Error('请选择不超过 1MB 的 JSON 正则文件。');
+      if(!/\.json$/i.test(file.name)||file.size>3*1024*1024)throw new Error('请选择不超过 3MB 的 JSON 正则文件。');
       const entries=extractRules1105(JSON.parse(await file.text()));
       if(!entries.length||entries.length>100)throw new Error('正则文件应包含 1～100 条规则。');
       const imported=entries.map((rule,i)=>normalizeRule1105(rule,i));
@@ -1299,13 +1637,16 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       <h3>正则美化预览</h3><label>预览番外<select id="violetPreviewStory">${state.stories.map(s=>`<option value="${esc(s.id)}" ${s.id===st.id?'selected':''}>${esc(s.title)}</option>`).join('')}</select></label>
       <p id="violetPreviewCount" class="muted"></p>
       <div class="violet-preview-area reader-body" id="violetRegexPreviewBody"></div>
-      <p class="muted">仅在此窗口预览，不改变正文原稿；跨 HTML 元素的正则匹配不会执行。</p>
+      <p class="muted">仅在预览窗口展示，不修改原稿；交互预览不写入本地记录。大型模板支持跨行匹配原始番外，未适配的酒馆脚本不会运行。</p>
       <div class="violet-extra-actions"><button type="button" data-violet-cancel>关闭</button></div>`);
     const select=dlg.querySelector('#violetPreviewStory'),body=dlg.querySelector('#violetRegexPreviewBody');
     const doPreview=()=>{
       const story=state.stories.find(s=>s.id===select.value);if(!story)return;
-      body.innerHTML=bodyHTML(story);
-      const count=applyStoryRules1105(body,story.id,customRules);
+      const rules=customRules||ensureRules1105();
+      const rich=extractRichReplacements1105(story,rules);
+      body.innerHTML=bodyHTML({...story,body:rich.source});
+      replaceRichMarkers1105(body,rich.widgets,true);
+      const count=rich.widgets.length+applyStoryRules1105(body,story.id,rules);
       dlg.querySelector('#violetPreviewCount').textContent=`当前显示：${story.title} · 本次匹配替换 ${count} 处`;
     };
     select.addEventListener('change',doPreview);doPreview();
@@ -1316,30 +1657,93 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(name==='violet-regex-new'){editRegex1105();return}
     if(name==='violet-regex-edit'){editRegex1105(id);return}
     if(name==='violet-regex-toggle'&&r){saveRules1105(rules.map(x=>x.id===id?{...x,enabled:x.enabled===false}:x),'正则启用状态已保存');return}
-    if(name==='violet-regex-delete'&&r){if(confirm(`删除美化正则「${r.name}」？不会影响番外原稿。`))saveRules1105(rules.filter(x=>x.id!==id),'美化正则已删除');return}
+    if(name==='violet-regex-delete'&&r){
+      if(confirm(`确定永久删除美化正则「${r.name}」吗？\n仅删除此规则，不影响任何番外原稿。`)){
+        if(saveRules1105(rules.filter(x=>x.id!==id),'美化正则已删除')){
+          try{const stored=getChatStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
+            Object.keys(stored).filter(k=>k.includes('__'+safeId+'__')).forEach(k=>delete stored[k]);
+            localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));}catch(err){console.warn('清理已删除正则的互动记录失败：',err)}
+        }
+      }return
+    }
     if(name==='violet-regex-import'){$('#violetRegexImportFile')?.click();return}
     if(name==='violet-regex-export'){download('Violet-Storybook-Regex-Rules.json',new Blob([JSON.stringify({regexRules:rules},null,2)],{type:'application/json'}));return}
     if(name==='violet-regex-preview'){openRegexPreview1105();return}
   }
 
+  function installListAccordion1105(kind){
+    const parent=$('#pageContent');const grid=parent?.querySelector('.module-grid');
+    const panel=grid?.querySelector(':scope > .panel');
+    const heading=panel?.querySelector(':scope > h3');
+    if(!heading)return;
+    const expanded=kind==='theme'?themesListOpen1105:musicListOpen1105;
+    const label=kind==='theme'?'主题列表':'全部音乐';
+    const button=document.createElement('button');button.type='button';button.className='violet-section-fold';
+    button.dataset.action='violet-fold-'+kind;button.setAttribute('aria-expanded',String(expanded));
+    button.innerHTML=`<span>${heading.innerHTML}</span><span class="violet-chevron" aria-hidden="true">${expanded?'▾':'▸'}</span>`;
+    heading.replaceWith(button);
+    const fold=document.createElement('div');fold.className='violet-folded-list';fold.id='violet-fold-'+kind;fold.hidden=!expanded;
+    button.setAttribute('aria-controls',fold.id);
+    while(button.nextSibling)fold.appendChild(button.nextSibling);
+    panel.appendChild(fold);
+    bindActionButtons(panel);
+  }
+  function toggleListAccordion1105(kind){
+    if(kind==='theme')themesListOpen1105=!themesListOpen1105;
+    else musicListOpen1105=!musicListOpen1105;
+    const expanded=kind==='theme'?themesListOpen1105:musicListOpen1105;
+    const fold=document.getElementById('violet-fold-'+kind),button=document.querySelector('[data-action="violet-fold-'+kind+'"]');
+    if(fold)fold.hidden=!expanded;
+    if(button){button.setAttribute('aria-expanded',String(expanded));const arrow=button.querySelector('.violet-chevron');if(arrow)arrow.textContent=expanded?'▾':'▸'}
+  }
   render=function violetRenderWithAdditions1105(){
     originalRender1105();
     installStyles1105();ensureRules1105();
     if(currentPage==='characters')enhanceCharacters1105();
     if(currentPage==='series')enhanceSeries1105();
-    if(currentPage==='themes')enhanceRegexPanel1105();
+    if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105()}
+    if(currentPage==='music')installListAccordion1105('music');
   };
   openReader=function violetOpenReaderWithRegex1105(st){
     originalOpenReader1105(st);
-    try{applyStoryRules1105($('#readerBody'),st.id)}
-    catch(error){console.error('附加美化正则渲染失败：',error);toast('部分美化正则渲染失败，正文原稿未受影响。')}
+    try{
+      const readerBody=$('#readerBody');
+      const rich=extractRichReplacements1105(st,ensureRules1105());
+      if(rich.widgets.length){
+        readerBody.innerHTML=bodyHTML({...st,body:rich.source});
+        replaceRichMarkers1105(readerBody,rich.widgets,false);
+      }
+      applyStoryRules1105(readerBody,st.id);
+    }catch(error){console.error('附加美化正则渲染失败：',error);toast('部分美化正则渲染失败，正文原稿未受影响。')}
   };
   action=function violetActionWithAdditions1105(name,id,button){
     if(name==='violet-delete-character'){deleteCharacter1105(id);return}
     if(name==='violet-avatar'){openAvatar1105(id);return}
+    if(name==='violet-series-avatar'){openSeriesAvatar1105(id);return}
+    if(name==='violet-fold-theme'){toggleListAccordion1105('theme');return}
+    if(name==='violet-fold-music'){toggleListAccordion1105('music');return}
     if(name==='violet-toggle-series'){toggleSeries1105(id);return}
     if(name.startsWith('violet-regex-')){regexAction1105(name,id);return}
+    if(name==='delete-story'){
+      const existed=(state.stories||[]).some(st=>st.id===id);
+      const outcome=originalAction1105(name,id,button);
+      if(existed&&!(state.stories||[]).some(st=>st.id===id)){
+        try{const stored=getChatStore1105();const safeId=String(id).replace(/[^a-zA-Z0-9_-]/g,'_');
+          Object.keys(stored).filter(k=>k.startsWith(safeId+'__')).forEach(k=>delete stored[k]);
+          localStorage.setItem(CHAT_STORAGE_1105,JSON.stringify(stored));}catch(error){console.warn('清理已删除番外的互动记录失败：',error)}
+      }
+      return outcome;
+    }
     return originalAction1105(name,id,button);
+  };
+  const originalClearData1105=clearData;
+  clearData=async function violetClearDataIncludingInteractions1105(){
+    const before=state;
+    await originalClearData1105();
+    if(before!==state){
+      try{localStorage.removeItem(CHAT_STORAGE_1105)}
+      catch(error){console.warn('独立群聊互动记录清理失败：',error);toast('收藏已清空，但群聊互动记录清理失败，请检查浏览器存储。')}
+    }
   };
   // The original startup has already run above; refresh once so added controls show.
   render();
