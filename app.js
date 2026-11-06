@@ -534,11 +534,17 @@ function ensureNarrowScreenReaderStyles(){
 }
 function openReader(st){ensureNarrowScreenReaderStyles();readerId=st.id;state.activeStoryId=st.id;$('#readerMeta').textContent=`${seriesName(st.seriesId)} · 第 ${storyNo(st)} 章`;$('#readerTitle').textContent=st.title;const readerBody=$('#readerBody');readerBody.innerHTML=bodyHTML(st);readerBody.scrollTop=0;$('#readProgress').textContent=`阅读进度 ${st.readProgress||0}%`;$('#readerDialog').showModal();enterReaderPlayerLayer();readerBody.onscroll=()=>{const height=Math.max(readerBody.scrollHeight,1);const ratio=Math.min(100,Math.round((readerBody.scrollTop+readerBody.clientHeight)/height*100));const previous=Number(st.readProgress)||0;if(ratio>previous){st.readProgress=ratio;st.updatedAt=Date.now();$('#readProgress').textContent=`阅读进度 ${ratio}%`;clearTimeout(readerProgressTimer);readerProgressTimer=setTimeout(()=>{persist(null);readerProgressTimer=null},400)}};}
 $('#closeReader').onclick=$('#readerDone').onclick=()=>$('#readerDialog').close();$('#markRead').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st){st.readProgress=100;st.updatedAt=Date.now();persist('已标记读完');$('#readProgress').textContent='阅读进度 100%'}};$('#readerSource').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);$('#sourceText').textContent=st?.raw||'';$('#sourceDialog').showModal()};$('#closeSource').onclick=()=>$('#sourceDialog').close();$('#readerEdit').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openEdit(st)};$('#readerMusic').onclick=()=>{const st=state.stories.find(s=>s.id===readerId);if(st)openAssociation(st)};
-function openEdit(st){editingId=st.id;const f=$('#editForm');ensureStoryCoverFields(f);if(!f.querySelector('[name="summary"]')){const label=document.createElement('label');label.innerHTML='简介（可选）<textarea name="summary" rows="2"></textarea>';f.insertBefore(label,f.querySelector('[name="body"]')?.closest('label')||f.querySelector('.modal-actions')||null)}f.elements.title.value=st.title;f.elements.body.value=st.body;f.querySelector('[name="summary"]').value=st.summary||'';f.elements.tags.value=(st.tags||[]).join(', ');f.querySelector('[name="coverFile"]').value='';const existingCover=String(st.coverUrl||st.cover||'');f.querySelector('[name="coverUrl"]').value=/^https?:\/\//i.test(existingCover)?existingCover:'';f.elements.mode.value='text';f.elements.seriesId.innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}" ${s.id===st.seriesId?'selected':''}>${esc(s.name)}</option>`).join('');$('#editDialog').showModal()}
+function openEdit(st){editingId=st.id;const f=$('#editForm');ensureStoryCoverFields(f);if(!f.querySelector('[name="summary"]')){const label=document.createElement('label');label.innerHTML='简介（可选）<textarea name="summary" rows="2"></textarea>';f.insertBefore(label,f.querySelector('[name="body"]')?.closest('label')||f.querySelector('.modal-actions')||null)}f.elements.title.value=st.title;f.elements.body.value=st.body;f.querySelector('[name="summary"]').value=st.summary||'';f.elements.tags.value=(st.tags||[]).join(', ');
+  // Each story owns its own characterIds. Always overwrite the reused edit field
+  // with this story's actual characters, including clearing it when there are none.
+  const characterInput=f.querySelector('[name="characters"]');
+  if(characterInput)characterInput.value=(Array.isArray(st.characterIds)?st.characterIds:[])
+    .map(id=>state.characters.find(c=>c.id===id)?.name||'').filter(Boolean).join('，');
+  f.querySelector('[name="coverFile"]').value='';const existingCover=String(st.coverUrl||st.cover||'');f.querySelector('[name="coverUrl"]').value=/^https?:\/\//i.test(existingCover)?existingCover:'';f.elements.mode.value='text';f.elements.seriesId.innerHTML='<option value="">未分类</option>'+state.series.map(s=>`<option value="${s.id}" ${s.id===st.seriesId?'selected':''}>${esc(s.name)}</option>`).join('');$('#editDialog').showModal()}
 $('#editForm').elements.body.addEventListener('input',()=>{if(editingId){try{localStorage.setItem(KEY+'-draft-'+editingId,$('#editForm').elements.body.value)}catch{}}});
 $('#saveEdit').addEventListener('click',async e=>{
   e.preventDefault();const st=state.stories.find(s=>s.id===editingId);if(!st)return;
-  const index=state.stories.findIndex(s=>s.id===editingId),previous=structuredClone(st),f=$('#editForm');
+  const index=state.stories.findIndex(s=>s.id===editingId),previous=structuredClone(st),previousCharacters=state.characters.slice(),f=$('#editForm');
   const title=f.elements.title.value.trim();if(!title){toast('请填写番外标题');f.elements.title.focus();return}
   const coverFile=f.querySelector('[name="coverFile"]')?.files?.[0];
   const coverUrlInput=String(f.querySelector('[name="coverUrl"]')?.value||'').trim();
@@ -547,10 +553,27 @@ $('#saveEdit').addEventListener('click',async e=>{
     if(coverFile){nextCover=await imageFileToDataURL(coverFile);nextCoverUrl=''}
     else if(coverUrlInput){if(!/^https?:\/\//i.test(coverUrlInput))throw new Error('封面 URL 请以 http:// 或 https:// 开头。');nextCover=coverUrlInput;nextCoverUrl=coverUrlInput}
   }catch(error){toast(error.message||'封面图片处理失败');return}
+  // Resolve names to stable character IDs before persisting this particular story.
+  // Reuse existing character records; create a record only for a genuinely new name.
+  // A removed name is unlinked from this story, never deleted from other stories.
+  const characterInput=f.querySelector('[name="characters"]');
+  if(characterInput){
+    const names=[...new Set(String(characterInput.value||'').split(/[,，]/).map(n=>n.trim()).filter(Boolean))];
+    const ids=[];
+    const previouslyLinked=(Array.isArray(st.characterIds)?st.characterIds:[])
+      .map(id=>state.characters.find(c=>c.id===id)).filter(Boolean);
+    for(const name of names){
+      // If duplicate character names exist, keep this story's current stable ID.
+      let character=previouslyLinked.find(c=>c.name===name)||state.characters.find(c=>c.name===name);
+      if(!character){character={id:uid('char'),name,description:'',storyIds:[]};state.characters.push(character)}
+      ids.push(character.id);
+    }
+    st.characterIds=ids;
+  }
   st.history=[...(st.history||[]),{title:st.title,body:st.body,updatedAt:st.updatedAt}].slice(-1);
   st.title=title;st.body=f.elements.body.value;st.raw=st.body;st.summary=f.querySelector('[name="summary"]')?.value.trim()||'';st.tags=String(f.elements.tags.value||'').split(/[,，]/).map(tag=>tag.trim()).filter(Boolean);st.seriesId=f.elements.seriesId.value;st.cover=nextCover;st.coverUrl=nextCoverUrl;st.updatedAt=Date.now();
+  if(!persist(null)){state.stories[index]=previous;state.characters=previousCharacters;return}
   try{localStorage.removeItem(KEY+'-draft-'+editingId)}catch{}
-  if(!persist(null)){state.stories[index]=previous;return}
   toast('修改已保存；上一版本已备份');$('#editDialog').close();render();if($('#readerDialog').open)openReader(st);
 });
 function openAssociation(st){$('#associationStoryName').textContent=st.title;$('#associationPlaylist').innerHTML='<option value="">不关联歌单</option>'+state.playlists.map(p=>`<option value="${p.id}" ${p.id===st.music?.playlistId?'selected':''}>${esc(p.name)}</option>`).join('');const f=$('#associationForm');f.elements.mode.value=st.music?.mode||'fixed';f.elements.loop.value=st.music?.loop||'list';f.dataset.storyId=st.id;$('#associationDialog').showModal()}
@@ -943,6 +966,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   const expandedSeries1105=new Set();
   let themesListOpen1105=false;
   let musicListOpen1105=false;
+  const expandedSoundtrackSeries1105=new Set();
 
   function ensureRules1105(){
     if(!Array.isArray(state.regexRules))state.regexRules=[];
@@ -962,6 +986,17 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
       #pageContent .violet-section-fold{width:100%;display:flex;align-items:center;justify-content:space-between;text-align:left;gap:10px;font:inherit;font-weight:700;cursor:pointer;min-height:40px}
       #pageContent .violet-section-fold .violet-chevron{flex-shrink:0;font-size:1.05em}
       #pageContent .violet-folded-list[hidden]{display:none!important}
+      /* Per-series soundtrack controls, scoped to the music page only. */
+      #pageContent .violet-soundtrack-series{margin:10px 0;border:1px solid var(--line,rgba(127,127,127,.3));border-radius:8px;overflow:hidden;min-width:0}
+      #pageContent .violet-soundtrack-series > summary{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:12px 14px;cursor:pointer;font-weight:700;list-style:none;user-select:none;min-height:44px}
+      #pageContent .violet-soundtrack-series > summary::-webkit-details-marker{display:none}
+      #pageContent .violet-soundtrack-series > summary:focus-visible{outline:2px solid currentColor;outline-offset:-2px}
+      #pageContent .violet-soundtrack-series > summary .violet-soundtrack-series-name{min-width:0;overflow-wrap:anywhere;flex:1}
+      #pageContent .violet-soundtrack-series > summary .violet-soundtrack-count{font-size:.88em;font-weight:400;flex-shrink:0}
+      #pageContent .violet-soundtrack-series > summary .violet-chevron{flex-shrink:0}
+      #pageContent .violet-soundtrack-series[open] > summary .violet-chevron{transform:rotate(90deg)}
+      #pageContent .violet-soundtrack-series-rows{padding:0 12px 5px;min-width:0}
+      #pageContent .violet-soundtrack-series-rows > .list-row{min-width:0}
       /* Music layout: fit columns to the actual available width instead of the device width.
          Preserve the original 1105 theme, controls, drag-sort and accordion. */
       #pageContent .violet-music-grid{display:grid!important;grid-template-columns:repeat(auto-fit,minmax(min(100%,520px),1fr))!important;gap:16px;min-width:0}
@@ -1768,6 +1803,45 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(name==='violet-regex-preview'){openRegexPreview1105();return}
   }
 
+
+  function enhanceStorySoundtracks1105(){
+    // Group only the existing '番外配乐' rows; all buttons and music settings
+    // remain the exact original DOM elements with their existing click handlers.
+    const panel=[...document.querySelectorAll('#pageContent .panel')]
+      .find(p=>p.querySelector(':scope > h3')?.textContent.trim()==='番外配乐');
+    if(!panel)return;
+    const rows=[...panel.children].filter(el=>el.classList.contains('list-row')&&el.querySelector('[data-action="music"][data-id]'));
+    if(!rows.length)return;
+    const byId=new Map(rows.map(row=>[row.querySelector('[data-action="music"]').dataset.id,row]));
+    const grouped=[];
+    const taken=new Set();
+    for(const series of state.series||[]){
+      const memberRows=(state.stories||[]).filter(st=>st.seriesId===series.id)
+        .map(st=>byId.get(st.id)).filter(Boolean);
+      if(memberRows.length){grouped.push({id:series.id,name:series.name||'未命名系列',rows:memberRows});memberRows.forEach(row=>taken.add(row))}
+    }
+    const others=rows.filter(row=>!taken.has(row));
+    if(others.length)grouped.push({id:'__violet_story_music_uncategorized__',name:'未分类番外',rows:others});
+    for(const group of grouped){
+      const details=document.createElement('details');details.className='violet-soundtrack-series';
+      details.dataset.soundtrackSeries=group.id;
+      details.open=expandedSoundtrackSeries1105.has(group.id);
+      const summary=document.createElement('summary');
+      const name=document.createElement('span');name.className='violet-soundtrack-series-name';name.textContent='❖ '+group.name;
+      const count=document.createElement('span');count.className='muted violet-soundtrack-count';count.textContent=group.rows.length+' 篇';
+      const arrow=document.createElement('span');arrow.className='violet-chevron';arrow.setAttribute('aria-hidden','true');arrow.textContent='▸';
+      summary.append(name,count,arrow);details.appendChild(summary);
+      const contents=document.createElement('div');contents.className='violet-soundtrack-series-rows';
+      group.rows.forEach(row=>contents.appendChild(row));
+      details.appendChild(contents);
+      details.addEventListener('toggle',()=>{
+        if(details.open)expandedSoundtrackSeries1105.add(group.id);
+        else expandedSoundtrackSeries1105.delete(group.id);
+      });
+      panel.appendChild(details);
+    }
+  }
+
   function installListAccordion1105(kind){
     const parent=$('#pageContent');const grid=parent?.querySelector('.module-grid');
     const panel=grid?.querySelector(':scope > .panel');
@@ -1799,7 +1873,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(currentPage==='characters'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-character-grid');enhanceCharacters1105();}
     if(currentPage==='series'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-series-grid');enhanceSeries1105();}
     if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105()}
-    if(currentPage==='music'){const musicGrid=$('#pageContent .module-grid');if(musicGrid)musicGrid.classList.add('violet-music-grid');installListAccordion1105('music')}
+    if(currentPage==='music'){const musicGrid=$('#pageContent .module-grid');if(musicGrid)musicGrid.classList.add('violet-music-grid');installListAccordion1105('music');enhanceStorySoundtracks1105()}
   };
   openReader=function violetOpenReaderWithRegex1105(st){
     originalOpenReader1105(st);
