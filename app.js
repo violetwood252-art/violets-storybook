@@ -1867,12 +1867,71 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     if(fold)fold.hidden=!expanded;
     if(button){button.setAttribute('aria-expanded',String(expanded));const arrow=button.querySelector('.violet-chevron');if(arrow)arrow.textContent=expanded?'▾':'▸'}
   }
+  // The deletion control is added only to the existing CSS editor toolbar;
+  // none of the approved theme-list markup or other modules is replaced.
+  function installThemeDeleteControl1105(){
+    const saveButton=$('#pageContent [data-action="save-theme"]');
+    if(!saveButton||$('#pageContent [data-action="violet-delete-theme"]'))return;
+    const button=document.createElement('button');
+    button.type='button';
+    button.className='button secondary';
+    button.dataset.action='violet-delete-theme';
+    button.textContent='删除主题';
+    button.title='删除当前在 CSS 编辑器中选择的主题';
+    saveButton.after(button);
+    bindActionButtons(saveButton.parentElement);
+  }
+  function deleteSelectedTheme1105(){
+    const selectedId=$('#themeSelect')?.value;
+    const theme=state.themes.find(t=>t.id===selectedId);
+    if(!theme){toast('请先选择要删除的主题。');return}
+    if(state.themes.length<=1){toast('请至少保留一个主题，可先新建主题后再删除。');return}
+    const snapshot=readActiveThemeSnapshot();
+    const deletingActive=state.activeThemeId===selectedId||theme.active||snapshot?.id===selectedId;
+    const replacement=state.themes.find(t=>t.id!==selectedId&&(t.active||t.id===state.activeThemeId))
+      ||state.themes.find(t=>t.id==='theme-default'&&t.id!==selectedId)
+      ||state.themes.find(t=>t.id!==selectedId);
+    const question=`确定删除主题「${theme.name}」吗？\n删除后无法撤销；只移除此主题的 CSS，不会删除番外、角色或配乐。`
+      +(deletingActive?`\n当前主题正在应用，删除后将切换到「${replacement.name}」。`:'' );
+    if(!confirm(question))return;
+
+    const previousThemes=state.themes;
+    const previousActiveId=state.activeThemeId;
+    // Create replacement objects instead of mutating the originals, so a failed
+    // localStorage write can restore the previous state without side effects.
+    state.themes=previousThemes.filter(t=>t.id!==selectedId).map(t=>deletingActive?{...t,active:t.id===replacement.id}:t);
+    if(deletingActive)state.activeThemeId=replacement.id;
+    const nextActive=state.themes.find(t=>t.id===state.activeThemeId)||state.themes.find(t=>t.active)||state.themes[0];
+    const restoreSnapshot=()=>{
+      try{
+        if(snapshot)localStorage.setItem(ACTIVE_THEME_KEY,JSON.stringify(snapshot));
+        else localStorage.removeItem(ACTIVE_THEME_KEY);
+      }catch(error){console.error('恢复主题快照失败：',error)}
+    };
+    // A deleted active theme must not be revived by the separate theme snapshot.
+    // Persist both storage slots or roll back the in-memory deletion.
+    if(deletingActive&&!writeActiveThemeSnapshot(nextActive)){
+      state.themes=previousThemes;state.activeThemeId=previousActiveId;
+      toast('主题删除未保存：无法更新当前主题记录，请检查本地存储空间。');
+      return;
+    }
+    if(!persist(null)){
+      state.themes=previousThemes;state.activeThemeId=previousActiveId;
+      if(deletingActive)restoreSnapshot();
+      toast('主题删除失败，已保留原主题；请检查本地存储空间。');
+      return;
+    }
+    // Reapply only the surviving active theme, clearing any temporary CSS preview.
+    applyActiveTheme(nextActive);
+    render();
+    toast('主题「'+theme.name+'」已删除。');
+  }
   render=function violetRenderWithAdditions1105(){
     originalRender1105();
     installStyles1105();ensureRules1105();
     if(currentPage==='characters'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-character-grid');enhanceCharacters1105();}
     if(currentPage==='series'){const grid=$('#pageContent .module-grid');if(grid)grid.classList.add('violet-series-grid');enhanceSeries1105();}
-    if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105()}
+    if(currentPage==='themes'){installListAccordion1105('theme');enhanceRegexPanel1105();installThemeDeleteControl1105()}
     if(currentPage==='music'){const musicGrid=$('#pageContent .module-grid');if(musicGrid)musicGrid.classList.add('violet-music-grid');installListAccordion1105('music');enhanceStorySoundtracks1105()}
   };
   openReader=function violetOpenReaderWithRegex1105(st){
@@ -1888,6 +1947,7 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
     }catch(error){console.error('附加美化正则渲染失败：',error);toast('部分美化正则渲染失败，正文原稿未受影响。')}
   };
   action=function violetActionWithAdditions1105(name,id,button){
+    if(name==='violet-delete-theme'){deleteSelectedTheme1105();return}
     if(name==='violet-delete-character'){deleteCharacter1105(id);return}
     if(name==='violet-avatar'){openAvatar1105(id);return}
     if(name==='violet-series-avatar'){openSeriesAvatar1105(id);return}
