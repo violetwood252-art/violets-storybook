@@ -1979,3 +1979,202 @@ bindActionButtons();getActiveTheme();installModalControlProtection();installRead
   // The original startup has already run above; refresh once so added controls show.
   render();
 })();
+
+
+/* ============================================================================
+ * Violet's Storybook — 2026-11-09 scoped additions
+ * Keep the complete theme-deletion-repair baseline byte-for-byte unchanged above.
+ * Adds CSS theme JSON import/export and exact character-story association filtering.
+ * No existing CSS, regex, story content, soundtrack or markup has been rewritten.
+ * ========================================================================== */
+(function violetThemeJsonAndCharacterLinks1109(){
+  'use strict';
+  const previousRender1109=render;
+  const previousAction1109=action;
+  const previousFilterStories1109=filterStories;
+  let selectedCharacterId1109='';
+  const THEME_JSON_FORMAT_1109='violets-storybook-css-theme';
+  const THEME_JSON_VERSION_1109=1;
+  const THEME_JSON_MAX_FILE_1109=5*1024*1024;
+
+  function selectedThemeForJson1109(){
+    const id=$('#themeSelect')?.value;
+    return (state.themes||[]).find(theme=>theme.id===id)||null;
+  }
+
+  function exportThemeJson1109(){
+    const theme=selectedThemeForJson1109();
+    const nameInput=$('#themeName');
+    const cssInput=$('#themeCSS');
+    if(!theme||!nameInput||!cssInput){toast('请先在主题工作室选择一个美化主题。');return}
+    // Export the editor draft, including CSS not yet saved or applied.
+    const name=nameInput.value.trim()||theme.name;
+    const data={
+      format:THEME_JSON_FORMAT_1109,
+      version:THEME_JSON_VERSION_1109,
+      theme:{name,type:theme.type||'reading',css:cssInput.value}
+    };
+    const filename=String(name||'我的美化').replace(/[\\/:*?"<>|\x00-\x1f]/g,'_').slice(0,100)||'我的美化';
+    download(filename+'-美化.json',new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));
+    toast('美化 JSON 已导出，包含当前编辑器里的 CSS；不会导出番外或其他收藏数据。');
+  }
+
+  function parseThemeJson1109(data){
+    if(!data||typeof data!=='object'||Array.isArray(data)||
+       data.format!==THEME_JSON_FORMAT_1109||data.version!==THEME_JSON_VERSION_1109){
+      throw new Error('文件不是此版本导出的美化 JSON，请不要选择整馆备份或正则规则文件。');
+    }
+    const theme=data.theme;
+    if(!theme||typeof theme!=='object'||Array.isArray(theme)||
+       typeof theme.name!=='string'||typeof theme.css!=='string'||
+       (theme.type!==undefined&&typeof theme.type!=='string')){
+      throw new Error('美化文件缺少有效的主题名称或 CSS 内容。');
+    }
+    const name=theme.name.trim();
+    const type=(theme.type||'reading').trim();
+    if(!name||name.length>160||!type||type.length>60){
+      throw new Error('美化文件的主题名称或类型无效。');
+    }
+    if(theme.css.length>THEME_JSON_MAX_FILE_1109){
+      throw new Error('美化 CSS 内容过大，无法导入。');
+    }
+    // Deliberately do not import source IDs or active flags. No imported theme
+    // can overwrite an existing theme or silently become the active theme.
+    return {id:uid('theme'),name,type,css:theme.css,active:false};
+  }
+
+  async function importThemeJsonFile1109(event){
+    const input=event.currentTarget;
+    const file=input.files?.[0];
+    if(!file)return;
+    try{
+      if(!/\.json$/i.test(file.name)||file.size>THEME_JSON_MAX_FILE_1109){
+        throw new Error('请选择不超过 5MB 的 .json 美化文件。');
+      }
+      const imported=parseThemeJson1109(JSON.parse(await file.text()));
+      const previousThemes=state.themes;
+      state.themes=[...(state.themes||[]),imported];
+      if(!persist(null)){
+        state.themes=previousThemes;
+        return;
+      }
+      render();
+      // Show the imported theme in the editor while keeping the applied theme
+      // and its independent localStorage snapshot exactly as they were.
+      const select=$('#themeSelect');
+      if(select){select.value=imported.id}
+      const name=$('#themeName'),css=$('#themeCSS');
+      if(name)name.value=imported.name;
+      if(css)css.value=imported.css;
+      toast('美化「'+imported.name+'」已导入并保存，请预览或手动保存并应用。');
+    }catch(error){
+      console.error('美化 JSON 导入失败：',error);
+      toast('美化导入失败：'+(error?.message||'JSON 文件无法读取。'));
+    }finally{
+      input.value=''; // Reimporting the same file must trigger change again.
+    }
+  }
+
+  function addThemeJsonControls1109(){
+    const toolbar=$('#pageContent [data-action="save-theme"]')?.parentElement;
+    if(!toolbar||toolbar.querySelector('[data-action="violet-theme-json-import"]'))return;
+    const makeButton=(action,label)=>{
+      const button=document.createElement('button');
+      button.type='button';button.className='button secondary';
+      button.dataset.action=action;button.textContent=label;
+      return button;
+    };
+    const importButton=makeButton('violet-theme-json-import','导入美化 JSON');
+    const exportButton=makeButton('violet-theme-json-export','导出美化 JSON');
+    const fileInput=document.createElement('input');
+    fileInput.type='file';fileInput.id='violetThemeJsonFile';
+    fileInput.accept='.json,application/json';fileInput.hidden=true;
+    fileInput.addEventListener('change',importThemeJsonFile1109);
+    // Add controls only; the pre-existing CSS toolbar, theme-delete button,
+    // live preview checkbox, styles and function implementations stay intact.
+    const deleteButton=toolbar.querySelector('[data-action="violet-delete-theme"]');
+    if(deleteButton)deleteButton.after(importButton,exportButton,fileInput);
+    else toolbar.append(importButton,exportButton,fileInput);
+    bindActionButtons(toolbar);
+  }
+
+  function characterLinkedStoryIds1109(id){
+    return new Set((state.stories||[])
+      .filter(story=>Array.isArray(story.characterIds)&&story.characterIds.includes(id))
+      .map(story=>story.id));
+  }
+
+  function applyCharacterStoryFilter1109(){
+    if(currentPage!=='stories'||!selectedCharacterId1109)return;
+    const character=(state.characters||[]).find(c=>c.id===selectedCharacterId1109);
+    if(!character){selectedCharacterId1109='';return}
+    const grid=$('#storyGrid');
+    if(!grid)return;
+    const allowedIds=characterLinkedStoryIds1109(character.id);
+    const cards=[...grid.querySelectorAll('.story-card')];
+    for(const cardEl of cards){
+      const id=cardEl.querySelector('[data-action="read"]')?.dataset.id;
+      if(!allowedIds.has(id))cardEl.remove();
+    }
+    // Keep ordinary search/series/sort controls active; the character condition
+    // is an additional intersection, never a text search for the character name.
+    if(!grid.querySelector('.story-card')){
+      grid.innerHTML='<div class="empty"><strong>没有符合条件的关联番外</strong>这位角色尚未关联故事，或当前搜索条件没有匹配结果。</div>';
+    }
+  }
+
+  function addCharacterFilterBanner1109(){
+    if(currentPage!=='stories'||!selectedCharacterId1109)return;
+    const character=(state.characters||[]).find(c=>c.id===selectedCharacterId1109);
+    if(!character){selectedCharacterId1109='';return}
+    const content=$('#pageContent');
+    if(!content)return;
+    const banner=document.createElement('div');
+    banner.className='toolbar violet-character-story-filter';
+    const title=document.createElement('span');
+    title.textContent='正在查看「'+character.name+'」明确关联的番外';
+    const clear=document.createElement('button');
+    clear.type='button';clear.className='pill';
+    clear.dataset.action='violet-show-all-stories';
+    clear.textContent='查看全部番外';
+    banner.append(title,clear);
+    const toolbar=content.querySelector(':scope > .toolbar');
+    if(toolbar)content.insertBefore(banner,toolbar);
+    else content.prepend(banner);
+    bindActionButtons(banner);
+  }
+
+  filterStories=function violetFilterStoriesWithCharacter1109(){
+    previousFilterStories1109();
+    applyCharacterStoryFilter1109();
+  };
+  render=function violetRenderWithThemeJsonAndCharacter1109(){
+    previousRender1109();
+    if(currentPage==='themes')addThemeJsonControls1109();
+    if(currentPage==='stories'){
+      addCharacterFilterBanner1109();
+      applyCharacterStoryFilter1109();
+    }
+  };
+  action=function violetActionWithThemeJsonAndCharacter1109(name,id,button){
+    if(name==='violet-theme-json-export'){exportThemeJson1109();return}
+    if(name==='violet-theme-json-import'){$('#violetThemeJsonFile')?.click();return}
+    if(name==='character-stories'){
+      const character=(state.characters||[]).find(c=>c.id===id);
+      if(!character){toast('角色档案不存在或已删除。');return}
+      selectedCharacterId1109=character.id;
+      go('stories');
+      return;
+    }
+    if(name==='violet-show-all-stories'){
+      selectedCharacterId1109='';
+      go('stories');
+      return;
+    }
+    return previousAction1109(name,id,button);
+  };
+  // Opening the normal sidebar '番外收藏' view resets the optional role filter.
+  const storiesNav1109=$('#nav [data-page="stories"]');
+  if(storiesNav1109)storiesNav1109.addEventListener('click',()=>{selectedCharacterId1109=''},true);
+  render();
+})();
